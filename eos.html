@@ -1,0 +1,342 @@
+<title>Kafka Exactly-Once Simulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="assets/sim.css">
+<style>
+.cell { fill: var(--panel-2); stroke: var(--line); stroke-width: 1; }
+.cell.ok { fill: var(--k-evt); stroke: var(--k-evt); }
+.cell.tx { fill: none; stroke: var(--k-evt); stroke-width: 1.6; stroke-dasharray: 3 2; }
+.cell.aborted { fill: var(--panel-2); stroke: var(--bad); stroke-width: 1.4; }
+.cell.mc { fill: var(--ok); stroke: var(--ok); }
+.cell.ma { fill: var(--bad); stroke: var(--bad); }
+.cell.off { fill: var(--k-sql); stroke: var(--k-sql); }
+.cell.offtx { fill: none; stroke: var(--k-sql); stroke-width: 1.6; stroke-dasharray: 3 2; }
+.cell.in { fill: var(--k-cmd); stroke: var(--k-cmd); }
+.ctext { font-family: var(--f-mono); font-size: 10px; font-weight: 500; fill: var(--on-k); }
+.ctext.dark { fill: var(--ink); }
+.ctext.strike { fill: var(--bad); text-decoration: line-through; }
+.otext { font-family: var(--f-mono); font-size: 9px; fill: var(--muted); }
+</style>
+
+<div class="app">
+  <header class="top">
+    <div>
+      <h1>Kafka <span>exactly-once</span></h1>
+      <p>A stream processor reads payments, writes ledger entries and commits its input offset. With plain consumers those are three separate writes, so a crash in between duplicates output. Kafka transactions make the output records and the offset commit one atomic unit, and fence off zombie instances.</p>
+    </div>
+    <nav class="pages" aria-label="Simulations"><a href="index.html">← All simulators</a></nav>
+  </header>
+
+  <section class="controls" aria-label="Simulation controls">
+    <div class="field"><span>Processing guarantee</span>
+      <div class="seg" id="mode" role="group" aria-label="Processing guarantee">
+        <button type="button" data-value="alo" aria-pressed="false">At-least-once</button>
+        <button type="button" data-value="eos" aria-pressed="true">Exactly-once (transactions)</button>
+      </div>
+    </div>
+    <label class="field" for="fault"><span>Fault</span>
+      <select id="fault">
+        <option value="none">None</option>
+        <option value="crash" selected>Processor crashes after producing, before committing</option>
+        <option value="zombie">Processor pauses (GC), a replacement takes over, then it wakes</option>
+      </select>
+    </label>
+    <label class="field" for="iso"><span>Downstream isolation.level</span>
+      <select id="iso">
+        <option value="read_committed" selected>read_committed</option>
+        <option value="read_uncommitted">read_uncommitted</option>
+      </select>
+    </label>
+    <div class="field"><span>Playback</span>
+      <div class="transport">
+        <button id="play" class="btn primary" type="button">Run</button>
+        <button id="step" class="btn" type="button" title="Run until the next record settles">Step</button>
+        <button id="reset" class="btn" type="button">Reset</button>
+      </div>
+    </div>
+    <div class="field"><span>Speed</span>
+      <div class="speed"><input id="speed" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Animation speed"><output id="speedOut">1×</output></div>
+    </div>
+  </section>
+
+  <main class="grid">
+    <section class="card stage">
+      <div class="stage-head">
+        <div>
+          <h2>Consume → transform → produce</h2>
+          <p>Solid cells are committed records; dashed cells belong to an open transaction; red-outlined cells were aborted. Green <b>C</b> and red <b>A</b> cells are the commit and abort markers the transaction coordinator writes into each partition.</p>
+        </div>
+        <div class="legend" aria-label="Token colours">
+          <span style="background:var(--k-cmd)">input</span>
+          <span style="background:var(--k-evt)">output</span>
+          <span style="background:var(--k-sql)">offset</span>
+          <span style="background:var(--k-ok)">commit</span>
+          <span style="background:var(--k-fail)">abort / fenced</span>
+        </div>
+      </div>
+      <div class="svgwrap"><svg id="topo" viewBox="0 0 1000 600" style="--ar:0.6" role="img" aria-label="Input topic, two processor instances, output topic, consumer offsets topic, transaction coordinator and a downstream consumer"></svg></div>
+    </section>
+
+    <aside class="side">
+      <section class="card">
+        <div class="check-head"><h2>Downstream view</h2><span id="verdict" class="pill">NOT STARTED</span></div>
+        <p class="derived">Three payments of +100, +50 and +25 should give a balance of exactly 175.</p>
+        <dl id="facts" class="kv"></dl>
+        <p id="note"></p>
+      </section>
+    </aside>
+
+    <section class="card log">
+      <div class="log-head"><h2>Cluster trace</h2><span>Producer, consumer and transaction coordinator requests</span></div>
+      <ol id="log"></ol>
+    </section>
+  </main>
+
+  <section class="glossary">
+    <h2>Terms used here</h2>
+    <dl>
+      <div><dt>transactional.id</dt><dd>A stable id per processor (per input partition). It lets the coordinator recognise a restarted or duplicate instance as "the same producer".</dd></div>
+      <div><dt>initTransactions · epoch</dt><dd>On startup the producer registers its transactional.id. The coordinator aborts any open transaction for it and bumps the epoch; older epochs are fenced.</dd></div>
+      <div><dt>sendOffsetsToTransaction</dt><dd>Writes the consumer offset commit into the same transaction as the output records, so "processed" and "output written" become one atomic step.</dd></div>
+      <div><dt>Commit / abort markers</dt><dd>Control records the coordinator appends to every partition in the transaction. They decide whether the records before them count.</dd></div>
+      <div><dt>read_committed</dt><dd>Consumers only read up to the last stable offset and skip aborted records. <code>read_uncommitted</code> sees everything, including data from aborted transactions.</dd></div>
+      <div><dt>Zombie fencing</dt><dd>A paused instance that wakes after being replaced gets <code>ProducerFencedException</code> because its epoch is old, so it can't write duplicate output.</dd></div>
+      <div><dt>Scope</dt><dd>Exactly-once covers Kafka-to-Kafka processing. Side effects outside Kafka (emails, HTTP calls) still need idempotency.</dd></div>
+    </dl>
+  </section>
+</div>
+
+<script src="assets/sim.js"></script>
+<script>
+(() => {
+const { $, txt, el, sleep, checkpoint, stage, path, node, token, travel, send, log, verdict, note, kv } = Sim;
+const INPUT = [{ id: 'pay-1', amt: 100 }, { id: 'pay-2', amt: 50 }, { id: 'pay-3', amt: 25 }];
+let S = { mode: 'eos', fault: 'crash', iso: 'read_committed' };
+let N, P, LOGS, TX, OFFSET, EPOCH, CUR;
+
+/* ---------- logs drawn as cell strips ---------- */
+function strip(layer, { x, y, name, sub }) {
+  const g = el('g', {}, layer);
+  txt(g, x, y - 22, name, 'tname', 'start');
+  if (sub) txt(g, x + 262, y - 22, sub, 'zsub', 'end');
+  const s = { g, x, y, cells: [], draw() {
+    while (s.cg && s.cg.firstChild) s.cg.firstChild.remove();
+    s.cg = s.cg || el('g', {}, g);
+    s.cells.slice(-7).forEach((c, i) => {
+      const cx = x + i * 38;
+      el('rect', { x: cx, y: y - 12, width: 34, height: 24, rx: 3, class: 'cell ' + c.state }, s.cg);
+      txt(s.cg, cx + 17, y + 4, c.label, 'ctext' + (c.state === 'tx' || c.state === 'offtx' ? ' dark' : c.state === 'aborted' ? ' strike' : ''));
+      txt(s.cg, cx + 17, y + 24, String(s.cells.indexOf(c)), 'otext');
+    });
+  }, add(c) { s.cells.push(c); s.draw(); return c; }, set(c, st) { c.state = st; s.draw(); } };
+  s.draw();
+  return s;
+}
+
+function build() {
+  const L = stage($('#topo'));
+  N = {}; P = {}; LOGS = {};
+  LOGS.in = strip(L.nodes, { x: 30, y: 120, name: 'payments.in-0', sub: 'input' });
+  LOGS.off = strip(L.nodes, { x: 30, y: 470, name: '__consumer_offsets', sub: 'group ledger' });
+  LOGS.out = strip(L.nodes, { x: 700, y: 120, name: 'ledger.out-0', sub: 'output' });
+  N.i1 = node(L.nodes, { x: 470, y: 140, w: 170, h: 84, title: 'processor-1', sub: 'txn.id ledger-0' });
+  N.i2 = node(L.nodes, { x: 470, y: 300, w: 170, h: 84, title: 'processor-2', sub: 'standby', status: 'waiting for partition' });
+  N.coord = node(L.nodes, { x: 470, y: 480, w: 190, h: 90, title: 'Txn coordinator', sub: 'ledger-0' });
+  N.down = node(L.nodes, { x: 830, y: 340, w: 210, h: 100, title: 'balance-svc', sub: 'isolation.level' });
+  N.i2.base = 'off'; N.i2.set();
+  P.in1 = path(L.edges, 'M300 120 C 340 120, 350 140, 383 140');
+  P.in2 = path(L.edges, 'M300 128 C 345 128, 345 300, 383 300');
+  P.out1 = path(L.edges, 'M557 140 C 610 140, 640 120, 694 120');
+  P.out2 = path(L.edges, 'M557 300 C 630 300, 650 128, 694 128');
+  P.off1 = path(L.edges, 'M400 182 C 340 260, 330 455, 302 466');
+  P.off2 = path(L.edges, 'M400 342 C 350 400, 330 470, 302 474');
+  P.c1 = path(L.edges, 'M557 160 H585 V480 H567');
+  P.c2 = path(L.edges, 'M470 342 V433');
+  P.mOut = path(L.edges, 'M567 500 C 660 500, 700 200, 780 136', 'dash');
+  P.mOff = path(L.edges, 'M375 480 H302', 'dash');
+  P.down = path(L.edges, 'M830 146 V288');
+  INPUT.forEach(r => LOGS.in.add({ label: '+' + r.amt, state: 'in' }));
+  if (S.mode === 'alo') { N.coord.base = 'off'; N.coord.set('not used'); }
+}
+
+function visible() {
+  return LOGS.out.cells.filter(c => c.amt && (S.mode === 'alo' || c.state === 'ok' || (S.iso === 'read_uncommitted' && (c.state === 'tx' || c.state === 'aborted'))));
+}
+function refreshDown() {
+  const v = visible();
+  const bal = v.reduce((a, c) => a + c.amt, 0);
+  N.down.st.textContent = `balance ${bal}`;
+  N.down.set(null, bal === 175 && v.length === 3 ? 'ok' : bal > 175 ? 'bad' : '');
+  kv('#facts', [['guarantee', S.mode === 'eos' ? 'exactly-once (transactions)' : 'at-least-once'], ['isolation.level', S.mode === 'eos' ? S.iso : 'n/a (no transactions)'],
+    ['records visible', v.map(c => '+' + c.amt).join(' ') || 'none'], ['balance', String(bal)], ['committed offset', String(OFFSET)], ['producer epoch', S.mode === 'eos' ? String(EPOCH) : 'n/a'],
+    ['txn state', S.mode === 'eos' ? TX : 'n/a']]);
+}
+function setTx(state) { TX = state; N.coord.set(`${state} · epoch ${EPOCH}`, state === 'Ongoing' ? 'busy' : state.includes('Abort') ? 'bad' : state.includes('Commit') ? 'ok' : ''); refreshDown(); }
+
+/* ---------- ops ---------- */
+const nm = i => i === 1 ? 'processor-1' : 'processor-2';
+async function init(g, inst) {
+  EPOCH = EPOCH == null ? 0 : EPOCH + 1;
+  N['i' + inst].set('initTransactions', 'busy');
+  await send(g, 'InitProducerId', 'cmd', P['c' + inst]);
+  log('cmd', 'InitProducerId', `${nm(inst)} registers <code>transactional.id=ledger-0</code>. The coordinator ${EPOCH ? `bumps the epoch to <b>${EPOCH}</b>, fencing every older instance` : 'assigns producer id 4001, epoch 0'}.`);
+  if (TX === 'Ongoing') {
+    LOGS.out.cells.filter(c => c.state === 'tx').forEach(c => LOGS.out.set(c, 'aborted'));
+    LOGS.off.cells.filter(c => c.state === 'offtx').forEach(c => LOGS.off.set(c, 'aborted'));
+    setTx('PrepareAbort');
+    await Promise.all([send(g, 'ABORT', 'fail', P.mOut), send(g, 'ABORT', 'fail', P.mOff)]);
+    LOGS.out.add({ label: 'A', state: 'ma' }); LOGS.off.add({ label: 'A', state: 'ma' });
+    log('bad', 'abort', 'The old instance left a transaction open. The coordinator aborts it and writes <b>ABORT markers</b> to <code>ledger.out</code> and <code>__consumer_offsets</code>; its output and offset commit no longer count.');
+    setTx('CompleteAbort');
+  } else setTx('Empty');
+  await send(g, `epoch ${EPOCH}`, 'reply', P['c' + inst], true);
+  N['i' + inst].set(`epoch ${EPOCH}`, '');
+}
+async function fetchRec(g, inst, off) {
+  const r = INPUT[off];
+  N['i' + inst].set(`fetch offset ${off}`, 'busy');
+  await send(g, '+' + r.amt, 'cmd', P['in' + inst]);
+  log('route', 'Fetch', `${nm(inst)} reads <code>payments.in-0</code> offset ${off}: ${r.id} +${r.amt}.`);
+  return r;
+}
+async function produce(g, inst, r) {
+  const eos = S.mode === 'eos';
+  if (eos && TX !== 'Ongoing') {
+    N.coord.set(null);
+    await send(g, 'AddPartitions', 'cmd', P['c' + inst]);
+    setTx('Ongoing');
+    log('cmd', 'begin', `${nm(inst)} begins a transaction; the coordinator records <code>ledger.out-0</code> and <code>__consumer_offsets</code> as part of it.`);
+  }
+  N['i' + inst].set(`produce credit +${r.amt}`, 'busy');
+  await send(g, `credit +${r.amt}`, 'evt', P['out' + inst]);
+  LOGS.out.add({ label: '+' + r.amt, state: eos ? 'tx' : 'ok', amt: r.amt, src: r.id });
+  log('evt', 'Produce', `${nm(inst)} writes <code>credit acct-7 +${r.amt}</code> to <code>ledger.out-0</code>${eos ? ' inside the open transaction (not yet visible to read_committed consumers)' : '. It is visible immediately'}.`);
+  refreshDown();
+}
+async function commitOffset(g, inst, off) {
+  const eos = S.mode === 'eos';
+  N['i' + inst].set(eos ? 'sendOffsetsToTxn' : 'commitSync', 'busy');
+  await send(g, `offset ${off + 1}`, 'sql', P['off' + inst]);
+  LOGS.off.add({ label: String(off + 1), state: eos ? 'offtx' : 'off' });
+  if (!eos) { OFFSET = off + 1; log('sql', 'OffsetCommit', `${nm(inst)} commits offset ${off + 1} for group <code>ledger</code>.`); }
+  else log('sql', 'TxnOffsetCommit', `${nm(inst)} adds "offset ${off + 1}" to the same transaction. It only takes effect if the transaction commits.`);
+  refreshDown();
+}
+async function commitTx(g, inst, off) {
+  N['i' + inst].set('commitTransaction', 'busy');
+  await send(g, 'EndTxn COMMIT', 'ok', P['c' + inst]);
+  setTx('PrepareCommit');
+  await Promise.all([send(g, 'COMMIT', 'ok', P.mOut), send(g, 'COMMIT', 'ok', P.mOff)]);
+  LOGS.out.cells.filter(c => c.state === 'tx').forEach(c => LOGS.out.set(c, 'ok'));
+  LOGS.off.cells.filter(c => c.state === 'offtx').forEach(c => LOGS.off.set(c, 'off'));
+  LOGS.out.add({ label: 'C', state: 'mc' }); LOGS.off.add({ label: 'C', state: 'mc' });
+  OFFSET = off + 1;
+  setTx('CompleteCommit');
+  log('ok', 'commit', `Coordinator writes <b>COMMIT markers</b>. The ledger entry and offset ${off + 1} become visible together.`);
+  await send(g, 'ok', 'reply', P['c' + inst], true);
+}
+async function deliverDown(g) {
+  await send(g, 'poll', 'evt', P.down);
+  refreshDown();
+}
+async function processOne(g, inst, off) {
+  const r = await fetchRec(g, inst, off);
+  await produce(g, inst, r);
+  if (S.mode === 'eos') { await commitOffset(g, inst, off); await commitTx(g, inst, off); }
+  else await commitOffset(g, inst, off);
+  N['i' + inst].set('idle');
+  await deliverDown(g);
+}
+
+async function takeover(g, why) {
+  for (let s = 3; s > 0; s--) { N.i1.set(`no heartbeat · ${s}`, 'crash'); await sleep(g, 380); }
+  log('warn', 'rebalance', `${why} After <code>session.timeout.ms</code> the group rebalances and <code>payments.in-0</code> moves to processor-2, which starts from the committed offset <b>${OFFSET}</b>.`);
+  N.i2.base = ''; N.i2.set('assigned partition 0', 'busy');
+  if (S.mode === 'eos') await init(g, 2);
+}
+
+async function run(g) {
+  const F = S.fault, eos = S.mode === 'eos';
+  N.down.set(`balance 0`); N.down.st.textContent = 'balance 0';
+  if (eos) await init(g, 1);
+  await checkpoint(g);
+  await processOne(g, 1, 0);
+  await checkpoint(g);
+
+  if (F === 'none') { await processOne(g, 1, 1); await checkpoint(g); await processOne(g, 1, 2); return; }
+
+  const r = await fetchRec(g, 1, 1);
+  await produce(g, 1, r);
+  if (eos) await commitOffset(g, 1, 1);
+  await deliverDown(g);
+  await checkpoint(g);
+  if (F === 'crash') {
+    N.i1.set('process killed', 'crash');
+    log('bad', 'crash', `processor-1 dies after writing <code>credit +50</code>${eos ? ' and its offset into the transaction, before commitTransaction' : ', before committing offset 2'}.`);
+    await takeover(g, 'processor-1 stops heartbeating.');
+    N.i1.base = 'off'; N.i1.set('dead', 'crash');
+    await checkpoint(g);
+    for (let off = OFFSET; off < 3; off++) { await processOne(g, 2, off); await checkpoint(g); }
+    return;
+  }
+  /* zombie */
+  N.i1.set('GC pause…', 'warn');
+  log('warn', 'pause', 'processor-1 freezes in a 40 s garbage-collection pause, mid-way through record 1. It is still alive and still holds its producer.');
+  await takeover(g, 'processor-1 stops heartbeating while paused.');
+  await checkpoint(g);
+  for (let off = OFFSET; off < 3; off++) { await processOne(g, 2, off); await checkpoint(g); }
+  N.i1.set('wakes up', 'busy');
+  log('warn', 'wake', 'processor-1 wakes up, unaware it was replaced, and carries on with record 1.');
+  if (eos) {
+    await send(g, 'EndTxn (epoch 0)', 'ok', P.c1);
+    log('bad', 'fenced', `The coordinator rejects it: epoch 0 &lt; current epoch ${EPOCH}. processor-1 gets <code>ProducerFencedException</code> and shuts down. Its write never becomes visible.`);
+    await send(g, 'FENCED', 'fail', P.c1, true);
+    N.i1.base = 'off'; N.i1.set('fenced · closed', 'crash');
+  } else {
+    await commitOffset(g, 1, 1);
+    log('bad', 'zombie', 'Nothing stops processor-1: its <code>credit +50</code> was already in the log, and now it commits an old offset too. The +50 payment has been applied twice.');
+    N.i1.set('zombie wrote duplicate', 'bad');
+    refreshDown();
+  }
+  await deliverDown(g);
+}
+
+function finish() {
+  refreshDown();
+  const v = visible(), bal = v.reduce((a, c) => a + c.amt, 0);
+  const eos = S.mode === 'eos';
+  let text, cls, html;
+  if (bal === 175 && v.length === 3) {
+    text = eos ? 'EXACTLY ONCE · 175' : 'CORRECT THIS TIME · 175'; cls = 'ok';
+    html = S.fault === 'none' ? (eos ? 'Each record went through begin → produce → offsets → commit. Output and progress always moved together.' : 'With no faults, at-least-once looks just like exactly-once. The difference only shows up when something crashes.')
+      : S.fault === 'crash' ? 'The crash left an open transaction. When processor-2 registered the same transactional.id, the coordinator aborted it, so the first <code>+50</code> and its offset were discarded together, and the record was processed once more, cleanly.'
+      : 'processor-2 bumped the epoch when it took over, so the zombie\'s late commit was rejected with <code>ProducerFencedException</code>. Only one +50 counts.';
+  } else if (eos && S.iso === 'read_uncommitted') {
+    text = `READ_UNCOMMITTED SEES ${bal}`; cls = 'bad';
+    html = 'The transaction did its job, but this consumer reads with <code>read_uncommitted</code>, so it also counted the aborted <code>+50</code>. Exactly-once needs <code>read_committed</code> on the reading side too.';
+  } else {
+    text = `DUPLICATE · ${bal}`; cls = 'bad';
+    html = S.fault === 'crash' ? 'The output was written but the offset wasn\'t, so processor-2 resumed from offset 1 and wrote <code>+50</code> again. At-least-once means duplicates downstream unless every consumer dedupes.'
+      : 'The paused instance had no idea it had been replaced and wrote its output anyway. Without transactions there is nothing to fence it.';
+  }
+  verdict(text, cls);
+  note(html);
+  log(cls === 'ok' ? 'ok' : 'bad', 'result', html);
+}
+function reset() {
+  OFFSET = 0; EPOCH = null; TX = 'Empty';
+  build();
+  refreshDown();
+  log('route', 'setup', S.mode === 'eos'
+    ? 'Processor configured with <code>transactional.id=ledger-0</code>, <code>enable.auto.commit=false</code>; downstream reads with <code>isolation.level=' + S.iso + '</code>.'
+    : 'Processor uses a plain producer and <code>commitSync()</code> after each record.');
+}
+
+Sim.bindSeg('#mode', v => { S.mode = v; });
+Sim.bindSelect('#fault', v => { S.fault = v; });
+Sim.bindSelect('#iso', v => { S.iso = v; });
+Sim.init({ reset, run, finish });
+})();
+</script>

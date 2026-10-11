@@ -1,0 +1,901 @@
+<title>Outbox Pattern Simulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: control bar on top, DB + relay + broker stage beside consistency check + message inspector, trace underneath */
+:root {
+  --bg: #EDF0EE; --panel: #FFFFFF; --panel-2: #F5F7F6; --ink: #18211D; --muted: #5B6862;
+  --line: #BFC8C3; --line-2: #DDE3E0; --accent: #D9530A;
+  --k-sql: #6A4BC4; --k-evt: #D9600E; --k-reply: #0D8576; --k-fail: #C42B2B;
+  --ok: #23824F; --bad: #C42B2B; --warn: #A86E12; --on-k: #FFFFFF;
+  --f-display: 'Archivo', 'Arial Narrow', system-ui, sans-serif;
+  --f-body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --f-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0F1311; --panel: #171D1A; --panel-2: #1C2420; --ink: #E4EBE7; --muted: #8F9D96;
+    --line: #3A4741; --line-2: #26302B; --accent: #FF7A33;
+    --k-sql: #A996FF; --k-evt: #FF8A45; --k-reply: #3FC7B1; --k-fail: #FF6B6B;
+    --ok: #5CC48C; --bad: #FF6B6B; --warn: #E3B04F; --on-k: #0E1311; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0F1311; --panel: #171D1A; --panel-2: #1C2420; --ink: #E4EBE7; --muted: #8F9D96;
+  --line: #3A4741; --line-2: #26302B; --accent: #FF7A33;
+  --k-sql: #A996FF; --k-evt: #FF8A45; --k-reply: #3FC7B1; --k-fail: #FF6B6B;
+  --ok: #5CC48C; --bad: #FF6B6B; --warn: #E3B04F; --on-k: #0E1311; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 14px; line-height: 1.5; }
+.app { max-width: none; margin: 0; padding: 20px clamp(16px, 2vw, 32px) 40px; display: flex; flex-direction: column; gap: 16px; }
+code, .mono { font-family: var(--f-mono); font-size: 0.92em; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 8px 24px; }
+h1 { font-family: var(--f-display); font-weight: 800; font-size: 28px; letter-spacing: -0.01em; margin: 0; line-height: 1.1; text-wrap: balance; }
+h1 span { color: var(--accent); }
+header.top p { margin: 4px 0 0; color: var(--muted); max-width: min(70ch, 100%); }
+@media (min-width: 1700px) { header.top p { max-width: 120ch; } }
+h2 { font-family: var(--f-display); font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; margin: 0; color: var(--muted); }
+.pages { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.pages a { padding: 5px 12px; color: var(--ink); text-decoration: none; font-weight: 500; background: var(--panel-2); }
+.pages a + a { border-left: 1px solid var(--line); }
+.pages a[aria-current="page"] { background: var(--ink); color: var(--bg); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: end; background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 12px 14px; }
+.field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.field > span { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
+select, button { font: inherit; color: var(--ink); }
+select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 0; max-width: 100%; }
+.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { background: var(--panel-2); border: 0; padding: 6px 12px; cursor: pointer; font-weight: 500; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.transport { display: flex; gap: 6px; }
+.btn { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px; cursor: pointer; font-weight: 500; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-k); min-width: 84px; }
+.btn:hover { filter: brightness(1.05); }
+button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.speed { display: flex; align-items: center; gap: 8px; }
+.speed input { accent-color: var(--accent); width: 120px; }
+.speed output { font-family: var(--f-mono); font-variant-numeric: tabular-nums; min-width: 3ch; }
+
+.grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+@media (min-width: 1120px) { .grid { grid-template-columns: minmax(0, 1fr) 360px; } .grid .log { grid-column: 1 / -1; } }
+@media (min-width: 1700px) { .grid { grid-template-columns: minmax(0, 1fr) 440px; } #log { max-height: 480px; } }
+.card { background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 14px; min-width: 0; }
+.stage-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; align-items: start; margin-bottom: 8px; }
+.stage-head p { margin: 4px 0 0; color: var(--muted); max-width: 72ch; font-size: 13px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px; }
+.legend span { font-family: var(--f-mono); font-size: 11px; padding: 2px 8px; border-radius: 999px; color: var(--on-k); }
+.svgwrap { overflow-x: auto; container-type: inline-size; }
+#topo { --ar: 0.575; width: 100%; min-width: 760px; height: min(calc(100cqw * var(--ar)), calc(100vh - 360px)); min-height: calc(760px * var(--ar)); display: block; }
+
+/* SVG */
+.edge { fill: none; stroke: var(--line); stroke-width: 1.5; transition: stroke 0.2s, opacity 0.2s; }
+.edge.live { stroke: var(--live); stroke-width: 2.5; opacity: 1; }
+.off { opacity: 0.28; }
+.arrow { fill: var(--line); }
+.zone { fill: var(--panel-2); stroke: var(--line); stroke-width: 1.2; }
+.zone.broker { fill: none; stroke-dasharray: 5 4; transition: stroke 0.2s; }
+.zone.broker.down { stroke: var(--bad); stroke-width: 2; }
+.ztitle { font-family: var(--f-display); font-weight: 700; font-size: 14px; fill: var(--ink); }
+.zsub { font-family: var(--f-mono); font-size: 10px; fill: var(--muted); }
+.zlabel { font-family: var(--f-mono); font-size: 10px; fill: var(--muted); }
+.zlabel.down { fill: var(--bad); font-weight: 500; }
+.box { fill: var(--panel); stroke: var(--ink); stroke-width: 1.4; transition: stroke 0.2s, fill 0.2s; }
+.node .title { font-family: var(--f-display); font-weight: 700; font-size: 15px; fill: var(--ink); }
+.node .sub { font-family: var(--f-mono); font-size: 10.5px; fill: var(--muted); }
+.node .status { font-family: var(--f-body); font-size: 11.5px; fill: var(--muted); font-style: italic; }
+.node.busy .box { stroke: var(--accent); stroke-width: 2.2; }
+.node.busy .status { fill: var(--accent); }
+.node.ok .box { stroke: var(--ok); stroke-width: 2.2; }
+.node.ok .status { fill: var(--ok); font-style: normal; font-weight: 600; }
+.node.bad .box { stroke: var(--bad); stroke-width: 2.2; }
+.node.bad .status { fill: var(--bad); font-style: normal; font-weight: 600; }
+.node.crash .box { stroke: var(--bad); stroke-width: 2.5; fill: var(--panel-2); }
+.node.crash .status { fill: var(--bad); font-style: normal; font-weight: 600; }
+.node.crash { animation: shake 0.4s 2; }
+@keyframes shake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+.ex .dia { fill: var(--panel); stroke: var(--ink); stroke-width: 1.4; transition: fill 0.15s; }
+.ex.hit .dia { fill: var(--accent); }
+.ex .letter { font-family: var(--f-display); font-weight: 800; font-size: 15px; fill: var(--ink); }
+.ex.hit .letter { fill: var(--on-k); }
+.ex .name, .q .name { font-family: var(--f-mono); font-size: 11.5px; font-weight: 500; fill: var(--ink); }
+.ex .type { font-family: var(--f-mono); font-size: 10px; fill: var(--muted); }
+.q .qbox { fill: var(--panel); stroke: var(--line); stroke-width: 1.3; }
+.q .slot { fill: var(--panel-2); stroke: var(--line-2); stroke-width: 1; transition: fill 0.15s; }
+.q .slot.ready { fill: var(--accent); stroke: var(--accent); }
+.q .slot.unacked { fill: none; stroke: var(--accent); stroke-dasharray: 2 2; stroke-width: 1.5; }
+.q .count { font-family: var(--f-mono); font-size: 10px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.q .key { font-family: var(--f-mono); font-size: 10px; fill: var(--k-evt); }
+.tiny { font-family: var(--f-mono); font-size: 9.5px; fill: var(--muted); }
+.tok rect { stroke: var(--panel); stroke-width: 1.5; }
+.tok text { font-family: var(--f-mono); font-size: 10.5px; font-weight: 500; fill: var(--on-k); }
+
+/* DB tables drawn in SVG */
+.tname { font-family: var(--f-mono); font-size: 11.5px; font-weight: 500; fill: var(--ink); }
+.thead { font-family: var(--f-mono); font-size: 9.5px; fill: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.tline { stroke: var(--line); stroke-width: 1; }
+.tempty { font-family: var(--f-mono); font-size: 10.5px; fill: var(--muted); font-style: italic; }
+.tcell { font-family: var(--f-mono); font-size: 10.5px; fill: var(--ink); }
+.tcell.st-warn { fill: var(--warn); font-weight: 500; }
+.tcell.st-ok { fill: var(--ok); font-weight: 500; }
+.trow .tbg { fill: none; stroke: none; }
+.trow .hl { fill: var(--accent); opacity: 0; }
+.trow.flash .hl { animation: rowflash 1.1s ease-out; }
+@keyframes rowflash { from { opacity: 0.32; } to { opacity: 0; } }
+.trow.tx .tbg { stroke: var(--accent); stroke-dasharray: 3 3; }
+.trow.tx .tcell { fill: var(--muted); font-style: italic; }
+.trow.locked .tbg { fill: var(--panel); stroke: var(--k-sql); stroke-width: 1.5; }
+.trow.rolled .tcell { fill: var(--bad); text-decoration: line-through; }
+.trow.bad .tbg { fill: var(--bad); }
+.trow.bad .tcell { fill: var(--on-k); }
+
+/* Side */
+.side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.check-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.pill { font-family: var(--f-mono); font-size: 11.5px; font-weight: 500; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.pill.run { border-color: var(--accent); color: var(--accent); }
+.pill.ok { background: var(--ok); border-color: var(--ok); color: var(--on-k); }
+.pill.bad { background: var(--bad); border-color: var(--bad); color: var(--on-k); }
+.pill.warn { background: var(--warn); border-color: var(--warn); color: var(--on-k); }
+.derived { margin: -4px 0 8px; font-size: 12px; color: var(--muted); }
+#note { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+#note:empty { display: none; }
+#note b { color: var(--ink); }
+dl.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; margin: 10px 0; font-size: 12px; }
+dl.kv dt { font-family: var(--f-mono); color: var(--muted); }
+dl.kv dd { margin: 0; font-family: var(--f-mono); overflow-wrap: anywhere; }
+.inspector pre { margin: 0; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 6px; padding: 8px 10px; font-family: var(--f-mono); font-size: 11.5px; overflow-x: auto; max-height: 200px; }
+.kdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--k-evt); }
+
+.log-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.log-head span { font-size: 12px; color: var(--muted); }
+#log { list-style: none; margin: 0; padding: 0; max-height: 340px; overflow-y: auto; font-size: 12.5px; border-top: 1px solid var(--line-2); }
+#log li { display: grid; grid-template-columns: 58px 118px minmax(0, 1fr); gap: 10px; padding: 5px 2px; border-bottom: 1px solid var(--line-2); align-items: baseline; }
+#log .t { font-family: var(--f-mono); color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11.5px; }
+#log .v { font-family: var(--f-mono); font-size: 11px; font-weight: 500; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); justify-self: start; white-space: nowrap; }
+#log .m { min-width: 0; overflow-wrap: anywhere; }
+#log code { background: var(--panel-2); padding: 0 4px; border-radius: 3px; }
+.v.sql { border-color: var(--k-sql) !important; color: var(--k-sql); }
+.v.commit { background: var(--k-sql); border-color: var(--k-sql) !important; color: var(--on-k); }
+.v.rollback, .v.nack, .v.crash { background: var(--bad); border-color: var(--bad) !important; color: var(--on-k); }
+.v.publish { border-color: var(--k-evt) !important; color: var(--k-evt); }
+.v.route { color: var(--muted); }
+.v.deliver { border-color: var(--accent) !important; color: var(--accent); }
+.v.ack { background: var(--ok); border-color: var(--ok) !important; color: var(--on-k); }
+.v.confirm { color: var(--k-reply); border-color: var(--k-reply) !important; }
+.v.info { background: var(--ink); border-color: var(--ink) !important; color: var(--bg); }
+.v.warn { background: var(--warn); border-color: var(--warn) !important; color: var(--on-k); }
+@media (max-width: 640px) { #log li { grid-template-columns: 50px minmax(0, 1fr); } #log .m { grid-column: 1 / -1; } }
+
+.glossary { background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 14px; }
+.glossary dl { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: 12px 24px; margin: 12px 0 0; }
+.glossary dt { font-family: var(--f-mono); font-weight: 500; font-size: 12.5px; }
+.glossary dd { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+@media (prefers-reduced-motion: reduce) { .node.crash, .trow.flash .hl { animation: none; } }
+</style>
+
+<div class="app">
+  <header class="top">
+    <div>
+      <h1>Transactional <span>outbox</span></h1>
+      <p>An order service has to save an order and tell the payment service about it. The database and the broker can't share a transaction, so compare the ways of writing to both and see which ones lose or invent events when something crashes.</p>
+    </div>
+    <nav class="pages" aria-label="Simulations"><a href="index.html">← All simulators</a></nav>
+  </header>
+
+  <section class="controls" aria-label="Simulation controls">
+    <div class="field"><span>Write strategy</span>
+      <div class="seg" role="group" aria-label="Write strategy">
+        <button id="s-cp" type="button" aria-pressed="false">Commit, then publish</button>
+        <button id="s-pc" type="button" aria-pressed="false">Publish, then commit</button>
+        <button id="s-ob" type="button" aria-pressed="true">Outbox + relay</button>
+        <button id="s-cdc" type="button" aria-pressed="false">Outbox + CDC</button>
+      </div>
+    </div>
+    <label class="field" for="fault"><span>Fault</span>
+      <select id="fault">
+        <option value="none">None</option>
+        <option value="app-crash" selected>Order service crashes mid-request</option>
+        <option value="broker-down">Broker unreachable for a few seconds</option>
+        <option value="relay-crash">Relay / connector dies after publish, before recording progress</option>
+      </select>
+    </label>
+    <div class="field"><span>Playback</span>
+      <div class="transport">
+        <button id="play" class="btn primary" type="button">Run</button>
+        <button id="step" class="btn" type="button" title="Run until the next statement or message settles">Step</button>
+        <button id="reset" class="btn" type="button">Reset</button>
+      </div>
+    </div>
+    <div class="field"><span>Speed</span>
+      <div class="speed"><input id="speed" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Animation speed"><output id="speedOut">1×</output></div>
+    </div>
+  </section>
+
+  <main class="grid">
+    <section class="card stage">
+      <div class="stage-head">
+        <div>
+          <h2 id="stageTitle">Topology</h2>
+          <p id="stageDesc"></p>
+        </div>
+        <div class="legend" aria-label="Token colours">
+          <span style="background:var(--k-sql)">SQL</span>
+          <span style="background:var(--k-evt)">event</span>
+          <span style="background:var(--k-reply)">publisher confirm</span>
+          <span style="background:var(--k-fail)">failure</span>
+        </div>
+      </div>
+      <div class="svgwrap"><svg id="topo" viewBox="0 0 1000 575" role="img" aria-label="Order service, its database with orders and outbox tables, the outbox relay, RabbitMQ, and the payment service with its own database"></svg></div>
+    </section>
+
+    <aside class="side">
+      <section class="card check">
+        <div class="check-head"><h2>Consistency check</h2><span id="verdict" class="pill">NOT STARTED</span></div>
+        <p class="derived">Invariant: every committed order gets exactly one charge, and no charge exists without an order.</p>
+        <dl id="facts" class="kv"></dl>
+        <p id="note"></p>
+      </section>
+      <section class="card inspector">
+        <h2>Last message</h2>
+        <dl id="props" class="kv"><dt>—</dt><dd>Nothing published yet</dd></dl>
+        <pre id="body">{}</pre>
+      </section>
+    </aside>
+
+    <section class="card log">
+      <div class="log-head"><h2>Trace</h2><span>SQL statements and AMQP methods, in the order they happen</span></div>
+      <ol id="log"></ol>
+    </section>
+  </main>
+
+  <section class="glossary">
+    <h2>Terms used here</h2>
+    <dl>
+      <div><dt>Dual write</dt><dd>Writing to the database and publishing to the broker as two separate steps. There is no transaction spanning both, so a crash between them leaves one done and the other not.</dd></div>
+      <div><dt>Transactional outbox</dt><dd>Insert the event into an <code>outbox</code> table in the same local transaction as the business change. The event becomes durable exactly when the order does.</dd></div>
+      <div><dt>Message relay (polling publisher)</dt><dd>A separate process that reads unsent outbox rows, publishes them, and marks them sent once the broker confirms.</dd></div>
+      <div><dt>FOR UPDATE SKIP LOCKED</dt><dd>Lets several relay instances poll the same table without picking up the same row twice at the same moment.</dd></div>
+      <div><dt>Publisher confirms</dt><dd>The broker sends <code>basic.ack</code> to the publisher once the message is persisted in every routed queue. The relay only marks a row sent after that ack.</dd></div>
+      <div><dt>At-least-once</dt><dd>What the outbox guarantees. If the relay dies between the confirm and the <code>UPDATE</code>, it publishes the same row again after a restart.</dd></div>
+      <div><dt>Idempotent consumer (inbox table)</dt><dd>The consumer records each <code>message_id</code> in <code>processed_messages</code> in the same transaction as its side effect, so a duplicate becomes a no-op.</dd></div>
+      <div><dt>Log tailing (CDC)</dt><dd>An alternative relay: a tool like Debezium reads the database's write-ahead log instead of polling, giving lower latency and no extra query load. The guarantees are the same.</dd></div>
+      <div><dt>Ghost event</dt><dd>A message describing a change that later rolled back. Once published it can't be recalled, and consumers act on something that never happened.</dd></div>
+    </dl>
+  </section>
+</div>
+
+<script>
+(() => {
+const NS = 'http://www.w3.org/2000/svg';
+const $ = s => document.querySelector(s);
+const NAME = { order: 'Order service', relay: 'Outbox relay', payment: 'Payment' };
+const CONSUMER = { order: 'order-svc', relay: 'outbox-relay', payment: 'payment-svc' };
+
+const S = { strategy: 'ob', fault: 'app-crash', speed: 1 };
+const RUN = { gen: 0, playing: false, stepping: false, running: false, done: false, simT: 0 };
+const CANCEL = Symbol('cancel');
+let TOKLAYER, CASE, PATH = {}, NODE = {}, EX, QUEUE, BROKER, TABLE = {}, DATA, STAT, TAG = 0, BROKER_DOWN = false;
+
+const hex = n => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function txt(parent, x, y, s, cls, anchor = 'middle') {
+  const t = el('text', { x, y, class: cls, 'text-anchor': anchor }, parent);
+  t.textContent = s;
+  return t;
+}
+
+/* ---------- Topology ---------- */
+const PATHS = {
+  'sql:order': 'M175 130 H218',
+  'pub:order': 'M100 85 V18 H640 V98',
+  'poll': 'M565 340 H502',
+  'pub:relay': 'M640 300 V162',
+  'bind': 'M670 130 H763',
+  'consume': 'M915 130 H952 V300 H922',
+  'sql:pay': 'M840 340 V378',
+};
+const NODES = [
+  { id: 'order', title: 'Order service', sub: 'order-svc', x: 100, y: 130, w: 150, h: 90 },
+  { id: 'relay', title: 'Outbox relay', sub: 'polls every 500 ms', x: 640, y: 340, w: 150, h: 80 },
+  { id: 'payment', title: 'Payment', sub: 'payment-svc · consumer', x: 840, y: 300, w: 160, h: 80 },
+];
+const TABLES = {
+  orders: { x: 236, y: 112, w: 248, cols: [['id', 0], ['amount', 96], ['status', 170]] },
+  outbox: { x: 236, y: 290, w: 248, cols: [['id', 0], ['event_type', 84], ['status', 184]] },
+  processed: { x: 752, y: 418, w: 196, title: 'processed_messages', cols: [['message_id', 0], ['handled_at', 120]] },
+  charges: { x: 752, y: 482, w: 196, cols: [['order_id', 0], ['amount', 80], ['status', 136]] },
+};
+const STATUS_CLS = { PENDING: 'st-warn', SENT: 'st-ok', CHARGED: 'st-ok', PLACED: 'st-ok', 'IN WAL': 'st-warn', STREAMED: 'st-ok' };
+const isOB = () => S.strategy === 'ob' || S.strategy === 'cdc';
+
+function render() {
+  const svg = $('#topo');
+  svg.innerHTML = '';
+  PATH = {}; NODE = {}; TABLE = {};
+  const defs = el('defs', {}, svg);
+  const mk = el('marker', { id: 'arr', viewBox: '0 0 8 8', refX: 7, refY: 4, markerWidth: 6, markerHeight: 6, orient: 'auto' }, defs);
+  el('path', { d: 'M0 0 L8 4 L0 8 z', class: 'arrow' }, mk);
+  const gZ = el('g', {}, svg), gE = el('g', {}, svg), gN = el('g', {}, svg);
+  TOKLAYER = el('g', {}, svg);
+  const ob = isOB(), cdc = S.strategy === 'cdc';
+
+  el('rect', { x: 220, y: 40, width: 280, height: 480, rx: 12, class: 'zone' }, gZ);
+  txt(gZ, 236, 66, 'orders-db', 'ztitle', 'start');
+  txt(gZ, 236, 82, 'PostgreSQL · owned by order-svc', 'zsub', 'start');
+  txt(gZ, 236, 410, ob ? 'orders + outbox commit in one transaction' : 'outbox table not used by this strategy', 'tiny', 'start');
+  el('rect', { x: 740, y: 380, width: 220, height: 182, rx: 12, class: 'zone' }, gZ);
+  txt(gZ, 752, 400, 'payment-db', 'ztitle', 'start');
+  BROKER = { rect: el('rect', { x: 512, y: 56, width: 420, height: 140, rx: 12, class: 'zone broker' }, gZ),
+             label: txt(gZ, 524, 74, 'rabbitmq broker', 'zlabel', 'start') };
+
+  for (const [id, d] of Object.entries(PATHS)) PATH[id] = el('path', { d, class: 'edge', 'marker-end': 'url(#arr)' }, gE);
+
+  for (const n0 of NODES) {
+    const n = cdc && n0.id === 'relay' ? { ...n0, title: 'CDC connector', sub: 'Debezium' } : n0;
+    const g = el('g', { class: 'node' }, gN);
+    el('rect', { x: n.x - n.w / 2, y: n.y - n.h / 2, width: n.w, height: n.h, rx: 10, class: 'box' }, g);
+    const big = n.h > 80;
+    txt(g, n.x, n.y - (big ? 16 : 10), n.title, 'title');
+    txt(g, n.x, n.y + (big ? 2 : 6), n.sub, 'sub');
+    const st = txt(g, n.x, n.y + (big ? 26 : 24), 'idle', 'status');
+    NODE[n.id] = { g, st, base: '' };
+  }
+
+  EX = el('g', { class: 'ex' }, gN);
+  el('polygon', { points: '640,100 670,130 640,160 610,130', class: 'dia' }, EX);
+  txt(EX, 640, 135, 'T', 'letter');
+  txt(EX, 602, 128, 'saga.events', 'name', 'end');
+  txt(EX, 602, 141, 'topic', 'type', 'end');
+
+  const qg = el('g', { class: 'q' }, gN);
+  el('rect', { x: 765, y: 113, width: 150, height: 34, rx: 4, class: 'qbox' }, qg);
+  const slots = [];
+  for (let i = 0; i < 8; i++) slots.push(el('rect', { x: 773.5 + i * 17, y: 121, width: 14, height: 18, rx: 2, class: 'slot' }, qg));
+  txt(qg, 840, 106, 'payment.inbox', 'name');
+  const count = txt(qg, 840, 160, '', 'count');
+  txt(qg, 840, 173, '↳ order.created', 'key');
+  QUEUE = { slots, count, ready: 0, unacked: 0 };
+  drawQueue();
+
+  for (const [id, t] of Object.entries(TABLES)) {
+    TABLE[id] = { ...t, title: t.title || id, g: el('g', {}, gN) };
+    drawTable(id);
+  }
+
+  if (ob) PATH['pub:order'].classList.add('off');
+  else {
+    PATH['poll'].classList.add('off'); PATH['pub:relay'].classList.add('off');
+    NODE.relay.g.classList.add('off'); NODE.relay.base = 'off';
+    TABLE.outbox.g.classList.add('off');
+    NODE.relay.st.textContent = 'not used';
+  }
+}
+
+function drawQueue() {
+  const q = QUEUE;
+  q.slots.forEach((s, i) => {
+    const fromHead = 7 - i;
+    s.setAttribute('class', 'slot' + (fromHead < q.unacked ? ' unacked' : fromHead < q.unacked + q.ready ? ' ready' : ''));
+  });
+  q.count.textContent = `ready ${q.ready} · unacked ${q.unacked}`;
+}
+function qAdd(r, u) { QUEUE.ready += r; QUEUE.unacked += u; drawQueue(); }
+
+function drawTable(id) {
+  const t = TABLE[id], g = t.g;
+  while (g.firstChild) g.firstChild.remove();
+  txt(g, t.x, t.y, t.title, 'tname', 'start');
+  t.cols.forEach(([h, x]) => txt(g, t.x + x, t.y + 18, h, 'thead', 'start'));
+  el('line', { x1: t.x, x2: t.x + t.w, y1: t.y + 24, y2: t.y + 24, class: 'tline' }, g);
+  const rows = DATA[id];
+  if (!rows.length) txt(g, t.x, t.y + 42, '(0 rows)', 'tempty', 'start');
+  rows.forEach((r, i) => {
+    const y = t.y + 42 + i * 20;
+    const rg = el('g', { class: 'trow' + (r.state ? ' ' + r.state : '') }, g);
+    el('rect', { x: t.x - 5, y: y - 14, width: t.w + 10, height: 19, rx: 3, class: 'tbg' }, rg);
+    el('rect', { x: t.x - 5, y: y - 14, width: t.w + 10, height: 19, rx: 3, class: 'hl' }, rg);
+    r.cells.forEach((c, j) => txt(rg, t.x + t.cols[j][1], y, c, 'tcell' + (STATUS_CLS[c] && !r.state ? ' ' + STATUS_CLS[c] : ''), 'start'));
+    if (r.flash) { rg.classList.add('flash'); r.flash = false; }
+  });
+  facts();
+}
+function addRow(id, cells, state = 'tx') {
+  const r = { t: id, cells, state, flash: true };
+  DATA[id].push(r);
+  drawTable(id);
+  return r;
+}
+function setRow(r, patch = {}) { Object.assign(r, patch, { flash: true }); drawTable(r.t); }
+function dropRolled(id) { DATA[id] = DATA[id].filter(r => r.state !== 'rolled'); drawTable(id); }
+
+function setNode(id, text, cls = '') {
+  const n = NODE[id]; if (!n) return;
+  n.g.setAttribute('class', ['node', n.base, cls].filter(Boolean).join(' '));
+  if (text != null) n.st.textContent = text;
+}
+function hitEx() { EX.classList.add('hit'); setTimeout(() => EX.classList.remove('hit'), 450); }
+function setBroker(down) {
+  BROKER_DOWN = down;
+  BROKER.rect.setAttribute('class', 'zone broker' + (down ? ' down' : ''));
+  BROKER.label.setAttribute('class', 'zlabel' + (down ? ' down' : ''));
+  BROKER.label.textContent = down ? 'rabbitmq broker · unreachable' : 'rabbitmq broker';
+}
+
+/* ---------- Timing ---------- */
+const active = () => RUN.playing || RUN.stepping;
+function sleep(g, ms) {
+  return new Promise((res, rej) => {
+    let t = 0, last = performance.now();
+    (function tick(now) {
+      if (g !== RUN.gen) return rej(CANCEL);
+      const dt = Math.min(64, now - last); last = now;
+      if (active()) { t += dt * S.speed; RUN.simT += dt * S.speed; }
+      if (t >= ms) res(); else requestAnimationFrame(tick);
+    })(last);
+  });
+}
+async function checkpoint(g) {
+  if (RUN.stepping) { RUN.stepping = false; syncControls(); }
+  while (!active()) { await new Promise(r => requestAnimationFrame(r)); if (g !== RUN.gen) throw CANCEL; }
+}
+function makeToken(label, kind) {
+  const g = el('g', { class: 'tok', visibility: 'hidden' }, TOKLAYER);
+  const w = label.length * 6.4 + 18;
+  const rect = el('rect', { x: -w / 2, y: -10, width: w, height: 20, rx: 10 }, g);
+  txt(g, 0, 4, label, '');
+  const tok = { el: g, color: '', setKind(k) { this.color = `var(--k-${k})`; rect.setAttribute('style', `fill:${this.color}`); } };
+  tok.setKind(kind);
+  return tok;
+}
+function travel(g, tok, id, reverse = false) {
+  const p = PATH[id];
+  const len = p.getTotalLength();
+  p.style.setProperty('--live', tok.color);
+  p.classList.add('live');
+  const place = d => { const pt = p.getPointAtLength(reverse ? len - d : d); tok.el.setAttribute('transform', `translate(${pt.x},${pt.y})`); };
+  place(0); tok.el.setAttribute('visibility', 'visible');
+  return new Promise((res, rej) => {
+    let d = 0, last = performance.now();
+    (function tick(now) {
+      if (g !== RUN.gen) return rej(CANCEL);
+      const dt = Math.min(64, now - last); last = now;
+      if (active()) { d += dt * 0.34 * S.speed; RUN.simT += dt * S.speed; }
+      place(Math.min(d, len));
+      if (d >= len) { p.classList.remove('live'); res(); } else requestAnimationFrame(tick);
+    })(last);
+  });
+}
+async function sql(g, label, path, reverse = false) {
+  const tok = makeToken(label, 'sql');
+  await travel(g, tok, path, reverse);
+  tok.el.remove();
+}
+
+/* ---------- Panels ---------- */
+function log(cls, verb, html) {
+  const li = document.createElement('li');
+  li.innerHTML = `<span class="t">${(RUN.simT / 1000).toFixed(1)}s</span><span class="v ${cls}">${verb}</span><span class="m">${html}</span>`;
+  const ol = $('#log');
+  ol.appendChild(li);
+  ol.scrollTop = ol.scrollHeight;
+}
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+function inspect(m) {
+  const rows = [
+    ['exchange', m.exchange], ['routing_key', m.rk], ['message_id', m.message_id],
+    ['correlation_id', m.correlation_id], ['app_id', m.app_id],
+    ['delivery_mode', '2 (persistent)'], ['content_type', 'application/json'],
+  ];
+  if (m.delivery_tag != null) rows.push(['delivery_tag', String(m.delivery_tag)], ['redelivered', 'false']);
+  $('#props').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${k === 'routing_key' ? '<span class="kdot"></span>' : ''}${esc(v)}</dd>`).join('');
+  $('#body').textContent = JSON.stringify(m.body, null, 2);
+}
+function facts() {
+  if (!DATA || !STAT) return;
+  const ord = DATA.orders[0], ob = DATA.outbox[0];
+  const rowState = r => r.state === 'tx' ? 'uncommitted' : r.state === 'rolled' ? 'rolled back' : r.state === 'locked' ? 'locked by relay' : 'committed';
+  const rows = [
+    ['orders row', ord ? `${ord.cells[0]} · ${rowState(ord)}` : 'none'],
+    ['outbox row', !isOB() ? 'n/a' : ob ? `${ob.cells[2]} · ${rowState(ob)}` : 'none'],
+    ['published', `${STAT.published}×`],
+    ['delivered', `${STAT.delivered}×${STAT.dupes ? ` (${STAT.dupes} duplicate skipped)` : ''}`],
+    ['charges', String(DATA.charges.length)],
+  ];
+  $('#facts').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('');
+}
+function setVerdict(text, cls) { const p = $('#verdict'); p.className = 'pill ' + cls; p.textContent = text; }
+function note(html) { $('#note').innerHTML = html; }
+
+/* ---------- Building blocks ---------- */
+async function placeOrder(g, withOutbox) {
+  const { orderId, sku } = CASE;
+  setNode('order', 'POST /orders', 'busy');
+  log('info', 'request', `Client sends <code>POST /orders</code>: 2 × ${sku}, 129.00 EUR.`);
+  await sleep(g, 500);
+  await checkpoint(g);
+  setNode('order', 'BEGIN; INSERT', 'busy');
+  await sql(g, 'BEGIN; INSERT', 'sql:order');
+  const o = addRow('orders', [orderId, '129.00', 'PLACED']);
+  log('sql', 'INSERT', `<code>BEGIN; INSERT INTO orders (id, amount, status) VALUES ('${orderId}', 129.00, 'PLACED')</code>. Nobody outside this transaction can see the row yet.`);
+  await sleep(g, 600);
+  let ob = null;
+  if (withOutbox) {
+    await sql(g, 'INSERT outbox', 'sql:order');
+    ob = addRow('outbox', [CASE.msg.message_id, 'order.created', S.strategy === 'cdc' ? 'IN WAL' : 'PENDING']);
+    log('sql', 'INSERT', `<code>INSERT INTO outbox (id, aggregate_id, event_type, payload, status) VALUES ('${CASE.msg.message_id}', '${orderId}', 'order.created', '{…}', 'PENDING')</code> in the <b>same</b> transaction. The event is just another row.`);
+    await sleep(g, 600);
+  }
+  await checkpoint(g);
+  return { o, ob };
+}
+async function commit(g, rows, html) {
+  setNode('order', 'COMMIT', 'busy');
+  await sql(g, 'COMMIT', 'sql:order');
+  rows.forEach(r => setRow(r, { state: '' }));
+  log('commit', 'COMMIT', html);
+  await sleep(g, 400);
+}
+async function rollback(g, rows, html, viaWire = true) {
+  if (viaWire) await sql(g, 'ROLLBACK', 'sql:order');
+  rows.forEach(r => setRow(r, { state: 'rolled' }));
+  log('rollback', 'ROLLBACK', html);
+  await sleep(g, 900);
+  rows.forEach(r => dropRolled(r.t));
+}
+
+async function publish(g, from) {
+  const m = CASE.msg;
+  m.app_id = from === 'relay' && S.strategy === 'cdc' ? 'debezium-outbox' : CONSUMER[from];
+  m.delivery_tag = null;
+  inspect(m);
+  const path = from === 'order' ? 'pub:order' : 'pub:relay';
+  log('publish', 'basic.publish', `<b>${NAME[from]}</b> → exchange <code>saga.events</code> · routing_key <code>order.created</code> · message_id <code>${m.message_id}</code>`);
+  const tok = makeToken('order.created', 'evt');
+  await travel(g, tok, path);
+  if (BROKER_DOWN) {
+    tok.setKind('fail');
+    log('nack', 'ECONNREFUSED', `<code>rabbitmq:5672</code> refused the connection. Nothing reached the broker.`);
+    await travel(g, tok, path, true);
+    tok.el.remove();
+    return false;
+  }
+  hitEx();
+  STAT.published++; facts();
+  log('route', 'route', `topic exchange matched <code>order.created</code> → <code>payment.inbox</code>`);
+  await travel(g, tok, 'bind');
+  tok.el.remove();
+  qAdd(1, 0);
+  await sleep(g, 250);
+  const ack = makeToken('basic.ack', 'reply');
+  log('confirm', 'confirm', `The message is persisted in <code>payment.inbox</code>, so the broker sends <code>basic.ack</code> back to ${CONSUMER[from]} (publisher confirms).`);
+  await travel(g, ack, path, true);
+  ack.el.remove();
+  return true;
+}
+
+async function consume(g) {
+  const m = CASE.msg;
+  m.delivery_tag = ++TAG;
+  qAdd(-1, 1);
+  STAT.delivered++; facts();
+  inspect(m);
+  log('deliver', 'basic.deliver', `<code>payment.inbox</code> → consumer <b>payment-svc</b> · delivery_tag ${TAG} · message_id <code>${m.message_id}</code>`);
+  const tok = makeToken('order.created', 'evt');
+  await travel(g, tok, 'consume');
+  tok.el.remove();
+  setNode('payment', 'BEGIN; dedupe check', 'busy');
+  await sql(g, 'INSERT … ON CONFLICT', 'sql:pay');
+  const seen = DATA.processed.find(r => r.cells[0] === m.message_id);
+  if (seen) {
+    STAT.dupes++;
+    setRow(seen);
+    log('sql', 'INSERT 0 0', `<code>INSERT INTO processed_messages (message_id) VALUES ('${m.message_id}') ON CONFLICT DO NOTHING</code> inserted 0 rows. This message was already handled, so payment-svc skips the charge.`);
+    setNode('payment', 'already processed', 'busy');
+    await sleep(g, 700);
+    log('commit', 'COMMIT', 'Nothing changed. payment-svc commits the empty transaction.');
+  } else {
+    const p = addRow('processed', [m.message_id, (RUN.simT / 1000).toFixed(1) + 's']);
+    log('sql', 'INSERT 0 1', `<code>INSERT INTO processed_messages … ON CONFLICT DO NOTHING</code> inserted 1 row: first time payment-svc has seen <code>${m.message_id}</code>.`);
+    await sleep(g, 450);
+    setNode('payment', 'charging 129.00 EUR', 'busy');
+    const c = addRow('charges', [CASE.orderId, '129.00', 'CHARGED']);
+    log('sql', 'INSERT', `<code>INSERT INTO charges</code>: card charged 129.00 EUR for order <b>${CASE.orderId}</b>, in the same transaction as the dedupe row.`);
+    await sleep(g, 650);
+    setRow(p, { state: '' }); setRow(c, { state: '' });
+    log('commit', 'COMMIT', 'payment-svc commits the dedupe row and the charge together.');
+  }
+  await sleep(g, 300);
+  qAdd(0, -1);
+  log('ack', 'basic.ack', `payment-svc acks delivery_tag ${TAG}; the broker deletes it from <code>payment.inbox</code>.`);
+  setNode('payment', seen ? 'duplicate skipped' : 'charged', 'ok');
+}
+
+/* ---------- Strategy 1: commit, then publish ---------- */
+async function runCP(g) {
+  const { o } = await placeOrder(g, false);
+  await commit(g, [o], `Order <b>${CASE.orderId}</b> is durable. The event isn't: until <code>basic.publish</code> succeeds it exists only in this process's memory.`);
+  setNode('order', 'committed · publishing', 'busy');
+  await checkpoint(g);
+  if (S.fault === 'app-crash') {
+    await sleep(g, 300);
+    setNode('order', 'process killed', 'crash');
+    log('crash', 'SIGKILL', `order-svc is killed (OOM, deploy, node loss) between <code>COMMIT</code> and <code>basic.publish</code>.`);
+    await sleep(g, 1400);
+    setNode('order', 'restarted', '');
+    log('warn', 'lost', `After the restart nothing remembers that <code>order.created</code> was never sent. The broker never saw it, so payment-svc will never hear about this order.`);
+    return;
+  }
+  if (S.fault === 'broker-down') setBroker(true);
+  const ok = await publish(g, 'order');
+  if (!ok) {
+    setNode('order', '500 · order kept', 'bad');
+    log('warn', 'lost', `order-svc can't take the <code>COMMIT</code> back. It could retry in memory, but those retries die with the process. Here it gives up and returns 500, although order <b>${CASE.orderId}</b> exists.`);
+    await sleep(g, 1600);
+    setBroker(false);
+    log('route', 'broker up', '<code>rabbitmq:5672</code> accepts connections again, but nobody still holds the event.');
+    return;
+  }
+  setNode('order', '201 Created', 'ok');
+  await checkpoint(g);
+  await consume(g);
+}
+
+/* ---------- Strategy 2: publish, then commit ---------- */
+async function runPC(g) {
+  const { o } = await placeOrder(g, false);
+  setNode('order', 'tx open · publishing', 'busy');
+  if (S.fault === 'broker-down') setBroker(true);
+  const ok = await publish(g, 'order');
+  if (!ok) {
+    setNode('order', 'ROLLBACK', 'bad');
+    await rollback(g, [o], `The publish failed, so order-svc rolls back. Database and broker agree that nothing happened.`);
+    setNode('order', '503 Unavailable', 'bad');
+    await sleep(g, 900);
+    setBroker(false);
+    log('route', 'broker up', '<code>rabbitmq:5672</code> accepts connections again. The customer has already seen an error.');
+    return;
+  }
+  await checkpoint(g);
+  if (S.fault === 'app-crash') {
+    setNode('order', 'process killed', 'crash');
+    log('crash', 'SIGKILL', `order-svc dies after the broker confirmed the event but before <code>COMMIT</code>.`);
+    await sleep(g, 700);
+    await rollback(g, [o], `Postgres sees the connection drop and rolls back the open transaction. Order <b>${CASE.orderId}</b> never existed.`, false);
+    setNode('order', 'restarted', '');
+    await checkpoint(g);
+    await consume(g);
+    log('warn', 'ghost', `payment-svc charged a card for an order that doesn't exist. A published message can't be recalled.`);
+    return;
+  }
+  await commit(g, [o], `Order <b>${CASE.orderId}</b> commits, but the event was already in <code>payment.inbox</code> before this point. A fast consumer could have looked up the order and got a 404.`);
+  setNode('order', '201 Created', 'ok');
+  await checkpoint(g);
+  await consume(g);
+}
+
+/* ---------- Strategy 3: transactional outbox + relay ---------- */
+async function poll(g, ob, first) {
+  setNode('relay', 'polling outbox', 'busy');
+  await sql(g, 'SELECT … SKIP LOCKED', 'poll');
+  setRow(ob, { state: 'locked' });
+  log('sql', 'SELECT', first
+    ? `<code>BEGIN; SELECT * FROM outbox WHERE status = 'PENDING' ORDER BY id LIMIT 50 FOR UPDATE SKIP LOCKED</code> returns 1 row. SKIP LOCKED lets several relay instances share the table.`
+    : `Relay claims the PENDING row <code>${ob.cells[0]}</code> again.`);
+  const back = makeToken('1 row', 'sql');
+  await travel(g, back, 'poll', true);
+  back.el.remove();
+  setNode('relay', 'publishing', 'busy');
+}
+
+async function walRead(g, ob, first) {
+  setNode('relay', 'reading WAL', 'busy');
+  const back = makeToken(`WAL ${CASE.lsn}`, 'sql');
+  await travel(g, back, 'poll', true);
+  back.el.remove();
+  log('sql', 'WAL', first
+    ? `The connector streams the WAL through logical replication slot <code>outbox_slot</code> and sees the <code>INSERT INTO outbox</code> at LSN <code>${CASE.lsn}</code>. No query touches the table, and nothing waits for a polling interval.`
+    : `After the restart the connector resumes from the last LSN it confirmed, <code>${CASE.flushed}</code>, which is before this INSERT. It reads the same change again.`);
+  setNode('relay', 'publishing', 'busy');
+}
+
+async function runOB(g) {
+  const cdc = S.strategy === 'cdc';
+  const { o, ob } = await placeOrder(g, true);
+  await commit(g, [o, ob], `Order and outbox row commit atomically. Either both exist or neither does, so there is no window in which the event can be lost.`);
+  if (S.fault === 'app-crash') {
+    setNode('order', 'process killed', 'crash');
+    log('crash', 'SIGKILL', `order-svc dies right after <code>COMMIT</code>, before it answers the client. It never talks to the broker, so nothing is lost.`);
+  } else {
+    setNode('order', '201 Created', 'ok');
+    log('info', 'response', `order-svc returns <code>201 Created</code>. It has not touched the broker.`);
+  }
+  if (S.fault === 'broker-down') setBroker(true);
+  await sleep(g, 500);
+  await checkpoint(g);
+
+  let attempt = 0, crashed = false;
+  for (;;) {
+    attempt++;
+    await (cdc ? walRead : poll)(g, ob, attempt === 1);
+    const ok = await publish(g, 'relay');
+    if (!ok) {
+      if (cdc) log('sql', 'hold', `The connector does not confirm LSN <code>${CASE.lsn}</code>, so the replication slot keeps the WAL from that point. The change is delayed, not lost.`);
+      else { setRow(ob, { state: '' }); log('sql', 'ROLLBACK', `The relay releases its claim. The row stays <code>PENDING</code>, so the event is delayed, not lost.`); }
+      for (let s = 2 ** attempt; s > 0; s--) { setNode('relay', `backoff · retry in ${s}s`, 'bad'); await sleep(g, 320); }
+      if (attempt >= 2) { setBroker(false); log('route', 'broker up', '<code>rabbitmq:5672</code> accepts connections again.'); }
+      await checkpoint(g);
+      continue;
+    }
+    await checkpoint(g);
+    if (S.fault === 'relay-crash' && !crashed) {
+      crashed = true;
+      setNode('relay', 'process killed', 'crash');
+      log('crash', 'SIGKILL', cdc
+        ? `The connector dies after the broker confirm but before it confirms LSN <code>${CASE.lsn}</code> to the slot. Its stored position is still <code>${CASE.flushed}</code>.`
+        : `The relay dies after the confirm but before <code>UPDATE outbox SET status = 'SENT'</code>. Its transaction aborts and the row lock is released.`);
+      setRow(ob, { state: '' });
+      await sleep(g, 500);
+      await consume(g);
+      await checkpoint(g);
+      setNode('relay', 'restarted', 'busy');
+      log('info', 'restart', cdc ? `The connector restarts and resumes streaming from its last confirmed LSN.` : `The relay restarts and polls again. As far as the database knows, this row was never sent.`);
+      await sleep(g, 500);
+      continue;
+    }
+    if (cdc) {
+      await sql(g, 'confirm LSN', 'poll');
+      CASE.flushed = CASE.lsn;
+      ob.cells[2] = 'STREAMED';
+      setRow(ob, { state: '' });
+      log('commit', 'LSN', `The connector confirms LSN <code>${CASE.lsn}</code> to the replication slot (and stores it as its offset). Postgres may now recycle WAL before that point. The outbox row itself is never updated; a cleanup job deletes old rows.`);
+      setNode('relay', `caught up · ${CASE.lsn}`);
+    } else {
+      await sql(g, "UPDATE … 'SENT'", 'poll');
+      ob.cells[2] = 'SENT';
+      setRow(ob, { state: '' });
+      log('commit', 'COMMIT', `<code>UPDATE outbox SET status = 'SENT', sent_at = now() WHERE id = '${ob.cells[0]}'; COMMIT</code>`);
+      setNode('relay', 'idle · 0 pending');
+    }
+    break;
+  }
+  await checkpoint(g);
+  await consume(g);
+}
+
+/* ---------- Verdict ---------- */
+const NOTES = {
+  cp: {
+    none: `Fine on the happy path. The risk is the gap between <code>COMMIT</code> and <code>basic.publish</code>: anything that kills the process there loses the event. Try the crash fault.`,
+    'app-crash': `<b>Lost event.</b> The order is committed but no other service will ever process it: no charge, no shipment, and nothing left to retry from.`,
+    'broker-down': `<b>Lost event.</b> The database said yes and the broker said no, and no transaction spans both of them.`,
+  },
+  pc: {
+    none: `Fine on the happy path, but the event was visible to payment-svc before the order committed. Try the crash fault to see what happens when the commit never comes.`,
+    'app-crash': `<b>Ghost charge.</b> The broker accepted an event for a transaction that later rolled back. Published messages can't be recalled, so a customer paid for an order that doesn't exist.`,
+    'broker-down': `Consistent, because the rollback undid the order. The cost is availability: a broker outage now fails every checkout.`,
+  },
+  cdc: {
+    none: `Same guarantee as the polling relay, but the connector reacted to the commit itself by reading the WAL. No polling queries, lower latency, and progress lives in the replication slot instead of a status column.`,
+    'app-crash': `Consistent. The crash came after <code>COMMIT</code>, so the INSERT was already in the WAL and the connector streamed it out regardless of what happened to order-svc.`,
+    'broker-down': `Consistent, just late. The connector didn't confirm the LSN while the broker was down, so the slot held the WAL until the change could be published. A long outage makes WAL pile up on disk, so slots need monitoring.`,
+    'relay-crash': `Consistent, with a duplicate. The connector restarted from its last confirmed LSN and published the change again. CDC is at-least-once too, and payment-svc's <code>processed_messages</code> table absorbed it.`,
+  },
+  ob: {
+    none: `order-svc only wrote to its own database. A separate relay turned the outbox row into a message, and the row's status records whether that has happened.`,
+    'app-crash': `Consistent. The crash came after <code>COMMIT</code>, so the outbox row was already durable and the relay published it. The client got no response and may retry, which is why <code>POST /orders</code> also wants an idempotency key.`,
+    'broker-down': `Consistent, just late. Checkout kept working during the outage. The outbox absorbed it and the relay drained it once the broker came back.`,
+    'relay-crash': `Consistent, with a duplicate. The outbox gives at-least-once delivery: the same <code>message_id</code> was published twice, and payment-svc's <code>processed_messages</code> table turned the second delivery into a no-op.`,
+  },
+};
+function finish() {
+  const order = DATA.orders[0];
+  const n = DATA.charges.length;
+  let text, cls;
+  if (order && n === 1) { text = STAT.dupes ? 'CONSISTENT · DUP ABSORBED' : 'CONSISTENT'; cls = 'ok'; }
+  else if (order && n === 0) { text = 'LOST EVENT'; cls = 'bad'; setRow(order, { state: 'bad' }); }
+  else if (!order && n > 0) { text = 'GHOST CHARGE'; cls = 'bad'; DATA.charges.forEach(c => setRow(c, { state: 'bad' })); }
+  else if (n > 1) { text = 'DOUBLE CHARGE'; cls = 'bad'; }
+  else { text = 'REJECTED · CONSISTENT'; cls = 'warn'; }
+  setVerdict(text, cls);
+  const html = NOTES[S.strategy][S.fault] || '';
+  note(html);
+  log(cls === 'ok' ? 'ack' : cls === 'warn' ? 'warn' : 'rollback', text.split(' ·')[0].toLowerCase(), html);
+}
+
+/* ---------- Controls ---------- */
+const STRAT = {
+  cp: ['Dual write: commit, then publish', 'order-svc commits to Postgres, then publishes straight to <code>saga.events</code>. Two writes, two systems, no shared transaction.'],
+  pc: ['Dual write: publish, then commit', 'order-svc publishes while its database transaction is still open, then commits. The event can escape before the data it describes is durable.'],
+  cdc: ['Transactional outbox + CDC', 'Same outbox table, different relay. A CDC connector (Debezium) streams the database write-ahead log through a logical replication slot, turns each <code>INSERT INTO outbox</code> into a message, and records progress as a WAL position (LSN) instead of updating the row.'],
+  ob: ['Transactional outbox', 'order-svc writes the order and an <code>outbox</code> row in one local transaction and never talks to the broker. The relay publishes pending rows and marks them sent once the broker confirms.'],
+};
+function newCase() {
+  const orderId = 'ord-' + (1040 + Math.floor(Math.random() * 60));
+  CASE = { orderId, sku: 'SKU-KB-0721', lsn: '0/16B3F28', flushed: '0/16B3D90' };
+  CASE.msg = {
+    exchange: 'saga.events', rk: 'order.created', message_id: 'evt-' + hex(6), correlation_id: orderId, app_id: '', delivery_tag: null,
+    body: { orderId, amount: 129.0, currency: 'EUR', items: [{ sku: CASE.sku, qty: 2 }] },
+  };
+}
+function reset() {
+  RUN.gen++;
+  Object.assign(RUN, { playing: false, stepping: false, running: false, done: false, simT: 0 });
+  DATA = { orders: [], outbox: [], processed: [], charges: [] };
+  STAT = { published: 0, delivered: 0, dupes: 0 };
+  TAG = 0; BROKER_DOWN = false;
+  newCase();
+  render();
+  facts();
+  setVerdict('NOT STARTED', '');
+  note('');
+  $('#log').innerHTML = '';
+  $('#props').innerHTML = '<dt>—</dt><dd>Nothing published yet</dd>';
+  $('#body').textContent = '{}';
+  const [title, desc] = STRAT[S.strategy];
+  $('#stageTitle').textContent = title;
+  $('#stageDesc').innerHTML = desc;
+  const relayOpt = $('#fault option[value="relay-crash"]');
+  relayOpt.disabled = !isOB();
+  log('route', 'declare', 'Declared topic exchange <code>saga.events</code> and durable queue <code>payment.inbox</code> bound with <code>order.created</code>. Publisher confirms are on.');
+  syncControls();
+}
+function startRun() {
+  if (RUN.running) return;
+  RUN.running = true;
+  setVerdict('RUNNING', 'run');
+  const g = RUN.gen;
+  ({ cp: runCP, pc: runPC, ob: runOB, cdc: runOB })[S.strategy](g).then(() => {
+    if (g !== RUN.gen) return;
+    finish();
+    Object.assign(RUN, { running: false, playing: false, stepping: false, done: true });
+    syncControls();
+  }).catch(e => { if (e !== CANCEL) console.error(e); });
+}
+function play() {
+  if (RUN.done) reset();
+  if (RUN.running && RUN.playing) { RUN.playing = false; syncControls(); return; }
+  RUN.playing = true;
+  startRun();
+  syncControls();
+}
+function stepOnce() {
+  if (RUN.done) reset();
+  RUN.playing = false;
+  RUN.stepping = true;
+  startRun();
+  syncControls();
+}
+function syncControls() {
+  $('#play').textContent = RUN.done ? 'Replay' : RUN.playing ? 'Pause' : RUN.running ? 'Resume' : 'Run';
+  for (const k of Object.keys(STRAT)) $('#s-' + k).setAttribute('aria-pressed', String(S.strategy === k));
+}
+function setStrategy(k) {
+  if (S.strategy === k) return;
+  S.strategy = k;
+  if (k !== 'ob' && k !== 'cdc' && S.fault === 'relay-crash') { S.fault = 'none'; $('#fault').value = 'none'; }
+  reset(); play();
+}
+
+$('#play').addEventListener('click', play);
+$('#step').addEventListener('click', stepOnce);
+$('#reset').addEventListener('click', reset);
+for (const k of Object.keys(STRAT)) $('#s-' + k).addEventListener('click', () => setStrategy(k));
+$('#fault').addEventListener('change', e => { S.fault = e.target.value; reset(); play(); });
+$('#speed').addEventListener('input', e => { S.speed = +e.target.value; $('#speedOut').textContent = S.speed + '×'; });
+
+S.fault = $('#fault').value;
+reset();
+setTimeout(play, 500);
+})();
+</script>

@@ -1,0 +1,290 @@
+<title>Work Queue Simulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="assets/sim.css">
+
+<div class="app">
+  <header class="top">
+    <div>
+      <h1>Work queue: <span>competing consumers</span></h1>
+      <p>One queue, several workers taking jobs from it. How many jobs each worker may hold at once (prefetch), which jobs go first (priority), what happens when producers outrun workers (backpressure), and how to protect a rate-limited API behind the workers (throttling).</p>
+    </div>
+    <nav class="pages" aria-label="Simulations"><a href="index.html">← All simulators</a></nav>
+  </header>
+
+  <section class="controls" aria-label="Simulation controls">
+    <label class="field" for="scenario"><span>Scenario</span>
+      <select id="scenario">
+        <option value="fair" selected>Competing consumers · prefetch 1</option>
+        <option value="hoard">Competing consumers · prefetch unlimited</option>
+        <option value="priority">Priority queue · urgent jobs jump ahead</option>
+        <option value="backpressure">Backpressure · max-length + reject-publish</option>
+        <option value="throttle-off">Rate-limited API · no limiter</option>
+        <option value="throttle-on">Rate-limited API · shared token bucket</option>
+      </select>
+    </label>
+    <div class="field"><span>Playback</span>
+      <div class="transport">
+        <button id="play" class="btn primary" type="button">Run</button>
+        <button id="step" class="btn" type="button" title="Run until the next job is acked">Step</button>
+        <button id="reset" class="btn" type="button">Reset</button>
+      </div>
+    </div>
+    <div class="field"><span>Speed</span>
+      <div class="speed"><input id="speed" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Animation speed"><output id="speedOut">1×</output></div>
+    </div>
+  </section>
+
+  <main class="grid">
+    <section class="card stage">
+      <div class="stage-head">
+        <div>
+          <h2 id="stageTitle">Queue and workers</h2>
+          <p id="stageDesc"></p>
+        </div>
+        <div class="legend" aria-label="Token colours">
+          <span style="background:var(--k-cmd)">job</span>
+          <span style="background:var(--k-comp)">urgent job</span>
+          <span style="background:var(--k-reply)">ack / 200</span>
+          <span style="background:var(--k-fail)">rejected / 429</span>
+        </div>
+      </div>
+      <div class="svgwrap"><svg id="topo" viewBox="0 0 1000 560" style="--ar:0.56" role="img" aria-label="A producer, one queue and three competing workers, with a rate-limited API behind them"></svg></div>
+    </section>
+
+    <aside class="side">
+      <section class="card">
+        <div class="check-head"><h2>Result</h2><span id="verdict" class="pill">NOT STARTED</span></div>
+        <dl id="facts" class="kv"></dl>
+        <p id="note"></p>
+      </section>
+    </aside>
+
+    <section class="card log">
+      <div class="log-head"><h2>Broker trace</h2><span>Publishes, deliveries and acks</span></div>
+      <ol id="log"></ol>
+    </section>
+  </main>
+
+  <section class="glossary">
+    <h2>Terms used here</h2>
+    <dl>
+      <div><dt>Competing consumers</dt><dd>Several workers consume from one queue; each message goes to exactly one of them. Adding workers adds throughput without changing producers.</dd></div>
+      <div><dt>Prefetch (basic.qos)</dt><dd>How many unacked messages the broker may push to one consumer. With 1, a worker gets a new job only when it finishes the last one, so fast workers take more. With no limit, jobs are dealt round-robin up front and a slow worker hoards its share.</dd></div>
+      <div><dt>Priority queue</dt><dd>Declared with <code>x-max-priority</code>. Ready messages with a higher <code>priority</code> property are delivered first. Messages already delivered (prefetched) aren't reordered.</dd></div>
+      <div><dt>Backpressure</dt><dd>Making a fast producer slow down instead of letting the queue grow without bound. Here <code>x-max-length=8</code> with <code>overflow=reject-publish</code> makes the broker nack publishes when the queue is full.</dd></div>
+      <div><dt>overflow modes</dt><dd><code>drop-head</code> (default) silently discards the oldest message, <code>reject-publish</code> nacks the newest one back to the producer, <code>reject-publish-dlx</code> also dead-letters it.</dd></div>
+      <div><dt>Throttling · token bucket</dt><dd>A shared budget of N calls per second. Workers take a token before calling the API and wait when none are left, so the API never sees more than its limit no matter how many workers run.</dd></div>
+    </dl>
+  </section>
+</div>
+
+<script src="assets/sim.js"></script>
+<script>
+(() => {
+const { $, txt, el, sleep, checkpoint, stage, path, node, queue, token, travel, send, log, verdict, note, kv } = Sim;
+const CYS = [110, 280, 450];
+let S = { scenario: 'fair' };
+let N, P, Q, C, JOBS, DONE, ORDER, STAT, API, BUFTXT;
+
+const CFG = {
+  fair: { title: 'Competing consumers · prefetch 1', jobs: 9, workers: [600, 600, 3000], prefetch: 1,
+    desc: 'Workers 1 and 2 are fast; worker 3 is on an overloaded node and takes five times as long. With <code>prefetch=1</code> the broker only hands a worker its next job once it acks the previous one.' },
+  hoard: { title: 'Competing consumers · prefetch unlimited', jobs: 9, workers: [600, 600, 3000], prefetch: Infinity,
+    desc: 'Same workers, but no prefetch limit. The broker deals jobs round-robin the moment they arrive, so the slow worker gets a third of them in its buffer while the fast ones sit idle at the end.' },
+  priority: { title: 'Priority queue', jobs: 8, workers: [900, null, null], prefetch: 1,
+    desc: 'One worker, <code>x-max-priority=10</code>. Six normal jobs are queued; then two urgent ones (priority 9) arrive and are delivered ahead of the waiting normal jobs.' },
+  backpressure: { title: 'Backpressure', jobs: 18, workers: [1500, 1500, null], prefetch: 1,
+    desc: 'The producer bursts 18 jobs much faster than two workers can handle. The queue is capped with <code>x-max-length=8</code> and <code>overflow=reject-publish</code>, and the producer uses publisher confirms.' },
+  'throttle-off': { title: 'Rate-limited API, no limiter', jobs: 9, workers: [300, 300, 300], prefetch: 1, api: true,
+    desc: 'Three fast workers each call a shipping API that allows 2 requests per second. Nobody coordinates them.' },
+  'throttle-on': { title: 'Rate-limited API, shared token bucket', jobs: 9, workers: [300, 300, 300], prefetch: 1, api: true, limiter: true,
+    desc: 'Same workers and API, but every worker takes a token from a shared bucket (2 per second) before calling.' },
+};
+
+function build() {
+  const cfg = CFG[S.scenario];
+  const L = stage($('#topo'));
+  N = {}; P = {}; BUFTXT = [];
+  N.producer = node(L.nodes, { x: 90, y: 280, w: 140, h: 76, title: 'Producer', sub: 'orders-api' });
+  Q = queue(L.nodes, { x: 390, y: 280, name: 'jobs', cap: 12, keys: [S.scenario === 'priority' ? 'x-max-priority=10' : S.scenario === 'backpressure' ? 'x-max-length=8 · reject-publish' : `prefetch ${cfg.prefetch === Infinity ? 'unlimited' : cfg.prefetch}`] });
+  P.pub = path(L.edges, `M160 280 H${390 - Q.w / 2 - 2}`);
+  C = [];
+  cfg.workers.forEach((ms, i) => {
+    const y = CYS[i];
+    const n = node(L.nodes, { x: 720, y, w: 170, h: 80, title: `Worker ${i + 1}`, sub: ms ? `~${(ms / 1000).toFixed(1)} s per job` : 'not running' });
+    P['c' + i] = path(L.edges, `M${390 + Q.w / 2} 280 C 560 280, 560 ${y}, 633 ${y}`);
+    BUFTXT[i] = txt(L.nodes, 720, y + 56, '', 'tiny');
+    if (!ms) { n.base = 'off'; n.set('stopped'); P['c' + i].classList.add('off'); }
+    C.push({ i, n, ms, prefetch: cfg.prefetch, buf: [], done: 0 });
+    if (cfg.api) P['a' + i] = path(L.edges, `M805 ${y} C 860 ${y}, 860 280, 878 280`);
+  });
+  if (cfg.api) {
+    N.api = node(L.nodes, { x: 935, y: 280, w: 110, h: 90, title: 'Shipping', sub: '2 req/s', status: '' });
+    API.txt = txt(L.nodes, 935, 345, '', 'tiny');
+  }
+}
+function drawBuf(c) {
+  BUFTXT[c.i].textContent = c.buf.length ? `holding ${c.buf.map(j => j.label).join(' ')}` : '';
+}
+function facts() {
+  const cfg = CFG[S.scenario];
+  const rows = [['jobs done', `${DONE} / ${cfg.jobs}`], ['elapsed', `${(Sim.simT / 1000).toFixed(1)} s`]];
+  C.filter(c => c.ms).forEach(c => rows.push([`worker ${c.i + 1}`, `${c.done} done${c.buf.length ? `, ${c.buf.length} held` : ''}`]));
+  if (S.scenario === 'priority') rows.push(['completion order', ORDER.join(' ')]);
+  if (S.scenario === 'backpressure') rows.push(['publishes rejected', String(STAT.rejected)], ['max queue depth', String(STAT.maxDepth)]);
+  if (cfg.api) rows.push(['API calls', String(STAT.calls)], ['429 Too Many Requests', String(STAT.r429)]);
+  kv('#facts', rows);
+}
+
+/* ---------- broker ---------- */
+function enqueue(job) {
+  const it = { label: job.label, kind: job.prio ? 'comp' : 'cmd', prio: job.prio || 0, job };
+  if (S.scenario === 'priority') {
+    const idx = Q.items.findIndex(x => !x.unacked && x.prio < it.prio);
+    if (idx >= 0) Q.items.splice(idx, 0, it); else Q.items.push(it);
+    Q.draw();
+  } else Q.push(it);
+  STAT.maxDepth = Math.max(STAT.maxDepth, Q.items.filter(x => !x.unacked).length);
+  return it;
+}
+async function publish(g, job) {
+  N.producer.set(`publish ${job.label}`, 'busy');
+  await send(g, job.label, job.prio ? 'comp' : 'cmd', P.pub);
+  if (S.scenario === 'backpressure' && Q.items.filter(x => !x.unacked).length >= 8) {
+    STAT.rejected++;
+    log('bad', 'basic.nack', `Queue is at <code>x-max-length=8</code>. The broker rejects <code>${job.label}</code> and the producer's confirm comes back as a nack.`);
+    await send(g, 'nack', 'fail', P.pub, true);
+    facts();
+    return false;
+  }
+  enqueue(job);
+  log('cmd', 'basic.publish', `${job.label}${job.prio ? ` with <code>priority=${job.prio}</code>` : ''} → <code>jobs</code>.`);
+  facts();
+  return true;
+}
+async function dispatcher(g) {
+  const cfg = CFG[S.scenario];
+  const live = C.filter(c => c.ms);
+  let rr = 0;
+  while (DONE < cfg.jobs) {
+    let moved = false;
+    for (let k = 0; k < live.length && !moved; k++) {
+      const c = live[(rr + k) % live.length];
+      const it = Q.items.find(x => !x.unacked);
+      if (it && c.buf.length < c.prefetch) {
+        rr = (live.indexOf(c) + 1) % live.length;
+        it.unacked = true; Q.draw();
+        c.buf.push(it); drawBuf(c);
+        log('route', 'basic.deliver', `${it.label} → worker ${c.i + 1}${cfg.prefetch === Infinity ? ` (now holding ${c.buf.length})` : ''}.`);
+        send(g, it.label, it.kind, P['c' + c.i]).then(() => { it.arrived = true; }).catch(() => {});
+        moved = true;
+      }
+    }
+    await sleep(g, moved ? 120 : 60);
+  }
+}
+/* ---------- API + token bucket ---------- */
+function refill() {
+  const now = Sim.simT;
+  API.tokens = Math.min(2, API.tokens + (now - API.last) / 1000 * 2);
+  API.last = now;
+  if (API.txt) API.txt.textContent = `tokens ${API.tokens.toFixed(1)} / 2 · 429s ${STAT.r429}`;
+}
+async function callApi(g, c, it) {
+  const cfg = CFG[S.scenario];
+  for (;;) {
+    if (cfg.limiter) {
+      refill();
+      while (API.tokens < 1) { c.n.set(`waiting for token`, 'warn'); await sleep(g, 80); refill(); }
+    }
+    refill();
+    c.n.set(`calling API for ${it.label}`, 'busy');
+    STAT.calls++;
+    const ok = API.tokens >= 1;
+    if (ok) API.tokens -= 1;
+    await send(g, `POST ${it.label}`, 'cmd', P['a' + c.i]);
+    N.api.set(ok ? '200' : '429', ok ? 'ok' : 'bad');
+    await send(g, ok ? '200' : '429', ok ? 'reply' : 'fail', P['a' + c.i], true);
+    refill(); facts();
+    if (ok) return;
+    STAT.r429++;
+    log('bad', '429', `Shipping API refuses worker ${c.i + 1}'s call for ${it.label}: over 2 requests/s. The worker backs off and retries.`);
+    c.n.set('backing off', 'bad');
+    await sleep(g, 500);
+  }
+}
+async function worker(g, c) {
+  const cfg = CFG[S.scenario];
+  while (DONE < cfg.jobs) {
+    const it = c.buf.find(x => x.arrived);
+    if (!it) { if (!c.buf.length) c.n.set(`idle · ${c.done} done`); await sleep(g, 60); continue; }
+    c.n.set(`working on ${it.label}`, 'busy');
+    if (cfg.api) await callApi(g, c, it);
+    await sleep(g, c.ms);
+    c.buf.splice(c.buf.indexOf(it), 1); drawBuf(c);
+    Q.remove(it);
+    c.done++; DONE++; ORDER.push(it.label);
+    log('ok', 'basic.ack', `worker ${c.i + 1} acks ${it.label}.`);
+    facts();
+    await checkpoint(g);
+  }
+  c.n.set(`done · ${c.done} jobs`, 'ok');
+}
+async function producer(g) {
+  const cfg = CFG[S.scenario];
+  if (S.scenario === 'priority') {
+    for (let i = 1; i <= 6; i++) await publish(g, { label: '#' + i });
+    while (DONE < 1) await sleep(g, 60);
+    log('warn', 'urgent', 'Two urgent jobs arrive while six normal ones are waiting.');
+    await publish(g, { label: 'U1', prio: 9 });
+    await publish(g, { label: 'U2', prio: 9 });
+  } else if (S.scenario === 'backpressure') {
+    for (let i = 1; i <= cfg.jobs; i++) {
+      while (!(await publish(g, { label: '#' + i }))) {
+        for (let s = 3; s > 0; s--) { N.producer.set(`queue full · retry in ${s}`, 'warn'); await sleep(g, 300); }
+      }
+    }
+  } else {
+    for (let i = 1; i <= cfg.jobs; i++) await publish(g, { label: '#' + i });
+  }
+  N.producer.set('all published', 'ok');
+}
+
+async function run(g) {
+  await Promise.all([producer(g), dispatcher(g), ...C.filter(c => c.ms).map(c => worker(g, c))]);
+}
+function finish() {
+  facts();
+  const t = (Sim.simT / 1000).toFixed(1);
+  const sc = S.scenario;
+  const slow = C[2] && C[2].ms ? C[2].done : 0;
+  const R = {
+    fair: [`DONE · SLOW WORKER TOOK ${slow}`, 'ok', `All 9 jobs finished in ${t} s. Because each worker could only hold one job, the fast workers kept pulling new ones and the slow worker only took <b>${slow}</b>. Work flows to whoever is free.`],
+    hoard: [`DONE · SLOW WORKER TOOK ${slow}`, 'warn', `All 9 jobs finished in ${t} s. With no prefetch limit the slow worker was handed <b>${slow}</b> jobs up front and the fast workers sat idle waiting for it. Compare with prefetch 1.`],
+    priority: ['URGENT JOBS SERVED FIRST', 'ok', `Completion order: <b>${ORDER.join(' ')}</b>. U1 and U2 overtook the normal jobs still waiting in the queue, but not the job the worker was already processing.`],
+    backpressure: [`NO LOSS · ${STAT.rejected} PUBLISHES PUSHED BACK`, 'ok', `The queue never held more than ${STAT.maxDepth} ready jobs. ${STAT.rejected} publishes were nacked, and the producer waited and retried instead of growing the queue without bound. All ${CFG.backpressure.jobs} jobs were processed.`],
+    'throttle-off': [`${STAT.r429} × 429`, 'bad', `Three workers each behaving reasonably still exceeded the API's 2 req/s together: <b>${STAT.r429}</b> calls were refused and had to be retried, which adds even more load.`],
+    'throttle-on': ['NO 429s · STEADY 2 REQ/S', 'ok', `Every call waited for a token from the shared bucket, so the API saw at most 2 requests per second and refused none of the ${STAT.calls} calls.`],
+  }[sc];
+  verdict(R[0], R[1]);
+  note(R[2]);
+  log(R[1] === 'bad' ? 'bad' : 'ok', 'result', R[2]);
+}
+function reset() {
+  DONE = 0; ORDER = []; STAT = { rejected: 0, maxDepth: 0, calls: 0, r429: 0 };
+  API = { tokens: 2, last: 0, txt: null };
+  build();
+  const cfg = CFG[S.scenario];
+  $('#stageTitle').textContent = cfg.title;
+  $('#stageDesc').innerHTML = cfg.desc;
+  facts();
+  log('route', 'setup', cfg.desc);
+}
+
+Sim.bindSelect('#scenario', v => { S.scenario = v; });
+Sim.init({ reset, run, finish });
+})();
+</script>

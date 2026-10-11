@@ -1,0 +1,384 @@
+<title>TCC Simulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="assets/sim.css">
+
+<div class="app">
+  <header class="top">
+    <div>
+      <h1>Try · Confirm · <span>Cancel</span></h1>
+      <p>TCC splits every step into a reservation and a later decision. Each service first <b>tries</b> (freezes money, reserves stock, locks a coupon), then the coordinator tells all of them to <b>confirm</b> or <b>cancel</b>. Unlike 2PC there are no database locks held in between, only business-level reservations, so the hard parts move into the participants.</p>
+    </div>
+    <nav class="pages" aria-label="Simulations"><a href="index.html">← All simulators</a></nav>
+  </header>
+
+  <section class="controls" aria-label="Simulation controls">
+    <label class="field" for="fault"><span>Scenario</span>
+      <select id="fault">
+        <option value="none">All tries succeed</option>
+        <option value="try-fails">Inventory Try fails (only 1 in stock)</option>
+        <option value="confirm-timeout">Confirm response to Wallet is lost</option>
+        <option value="empty-cancel">Try to Inventory is lost → empty cancel</option>
+        <option value="suspension-guarded" selected>Late Try arrives after Cancel (guarded)</option>
+        <option value="suspension-unguarded">Late Try arrives after Cancel (no guard)</option>
+      </select>
+    </label>
+    <div class="field"><span>Playback</span>
+      <div class="transport">
+        <button id="play" class="btn primary" type="button">Run</button>
+        <button id="step" class="btn" type="button" title="Run until the next call settles">Step</button>
+        <button id="reset" class="btn" type="button">Reset</button>
+      </div>
+    </div>
+    <div class="field"><span>Speed</span>
+      <div class="speed"><input id="speed" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Animation speed"><output id="speedOut">1×</output></div>
+    </div>
+  </section>
+
+  <main class="grid">
+    <section class="card stage">
+      <div class="stage-head">
+        <div>
+          <h2>Coordinator and participants</h2>
+          <p>Each participant exposes three endpoints per resource: <code>/try</code>, <code>/confirm</code>, <code>/cancel</code>. The <code>tcc_branch</code> table on each side is what makes them safe to retry and to receive out of order.</p>
+        </div>
+        <div class="legend" aria-label="Token colours">
+          <span style="background:var(--k-cmd)">Try</span>
+          <span style="background:var(--k-ok)">Confirm</span>
+          <span style="background:var(--k-comp)">Cancel</span>
+          <span style="background:var(--k-reply)">200 OK</span>
+          <span style="background:var(--k-fail)">failure</span>
+        </div>
+      </div>
+      <div class="svgwrap"><svg id="topo" viewBox="0 0 1000 600" style="--ar:0.6" role="img" aria-label="TCC coordinator with three participants: wallet, inventory and coupon, each with its resource state and branch log"></svg></div>
+    </section>
+
+    <aside class="side">
+      <section class="card">
+        <div class="check-head"><h2>Consistency check</h2><span id="verdict" class="pill">NOT STARTED</span></div>
+        <p class="derived">Invariant: the checkout either uses all three resources or none, and nothing stays frozen afterwards.</p>
+        <dl id="facts" class="kv"></dl>
+        <p id="note"></p>
+      </section>
+      <section class="card">
+        <h2>Last call</h2>
+        <dl id="props" class="kv"><dt>—</dt><dd>Nothing sent yet</dd></dl>
+        <pre class="body" id="body">—</pre>
+      </section>
+    </aside>
+
+    <section class="card log">
+      <div class="log-head"><h2>Trace</h2><span>Calls and branch-table writes, in order</span></div>
+      <ol id="log"></ol>
+    </section>
+  </main>
+
+  <section class="glossary">
+    <h2>Terms used here</h2>
+    <dl>
+      <div><dt>Try</dt><dd>Check the business rules and reserve the resource without using it: freeze money, mark stock as reserved, lock the coupon. Nothing is visible to the customer yet.</dd></div>
+      <div><dt>Confirm</dt><dd>Turn the reservation into the real change. It must not fail for business reasons (Try already checked) and must be idempotent, because the coordinator retries it until it gets a reply.</dd></div>
+      <div><dt>Cancel</dt><dd>Release the reservation. Also retried until it succeeds, so it must be idempotent too.</dd></div>
+      <div><dt>Empty cancel (null compensation)</dt><dd>A Cancel for a transaction whose Try never arrived. The participant must answer OK and record a "cancelled" marker instead of failing.</dd></div>
+      <div><dt>Suspension (hanging Try)</dt><dd>A delayed Try that arrives after its Cancel. Without a check against the cancel marker it reserves resources that nobody will ever confirm or cancel.</dd></div>
+      <div><dt>TCC vs 2PC</dt><dd>2PC holds database locks across the protocol. TCC holds business reservations instead, so other work can continue, but every service has to implement three operations and their edge cases.</dd></div>
+      <div><dt>TCC vs saga</dt><dd>A saga commits each step immediately and undoes it later with a compensation, so others can briefly see the change. TCC never makes the change visible until Confirm.</dd></div>
+    </dl>
+  </section>
+</div>
+
+<script src="assets/sim.js"></script>
+<script>
+(() => {
+const { $, txt, el, sleep, checkpoint, stage, path, node, table, token, travel, send, log, verdict, note, kv, hex, esc } = Sim;
+const PS = ['wallet', 'inventory', 'coupon'];
+const CY = { wallet: 100, inventory: 300, coupon: 500 };
+const OFF = { wallet: -24, inventory: 0, coupon: 24 };
+const D = {
+  wallet: { title: 'Wallet', svc: 'wallet-svc', what: 'freeze 129.00' },
+  inventory: { title: 'Inventory', svc: 'inventory-svc', what: 'reserve 2 units' },
+  coupon: { title: 'Coupon', svc: 'coupon-svc', what: 'lock SAVE10' },
+};
+let S = { fault: 'suspension-guarded' };
+let N, P = {}, T = {}, B, CTX, RES, RESTXT = {}, CLOG;
+
+function resText(p) {
+  const r = RES[p];
+  if (p === 'wallet') return `balance ${r.balance.toFixed(2)} · frozen ${r.frozen.toFixed(2)}`;
+  if (p === 'inventory') return `stock ${r.stock} · reserved ${r.reserved}`;
+  return `SAVE10 · ${r.state}`;
+}
+function drawRes(p) {
+  const r = RES[p];
+  const held = p === 'wallet' ? r.frozen > 0 : p === 'inventory' ? r.reserved > 0 : r.state.startsWith('locked');
+  RESTXT[p].textContent = resText(p);
+  RESTXT[p].setAttribute('class', 'lbl' + (held ? ' accent' : ''));
+  facts();
+}
+function facts() {
+  if (!CTX) return;
+  kv('#facts', [['global tx', `${CTX.gid} · ${CTX.status}`], ...PS.map(p => [D[p].svc, resText(p)]), ['branches', PS.map(p => `${p}:${B[p] ? B[p].cells[1] : '—'}`).join(' ')]]);
+}
+
+function build() {
+  const L = stage($('#topo'));
+  N = {}; P = {}; T = {};
+  P.req = path(L.edges, 'M120 122 V250');
+  for (const p of PS) {
+    const y0 = 300 + OFF[p], cy = CY[p];
+    P[p] = path(L.edges, `M205 ${y0} C 320 ${y0}, 320 ${cy}, 433 ${cy}`);
+    P['l' + p] = path(L.edges, `M605 ${cy} H643`);
+  }
+  P.clog = path(L.edges, 'M120 348 V398');
+  N.client = node(L.nodes, { x: 120, y: 90, w: 150, h: 64, title: 'Client', sub: 'POST /checkout' });
+  N.coord = node(L.nodes, { x: 120, y: 300, w: 170, h: 96, title: 'TCC coordinator', sub: 'tcc-tm' });
+  el('rect', { x: 20, y: 400, width: 290, height: 185, rx: 12, class: 'zone' }, L.zones);
+  txt(L.zones, 36, 424, 'coordinator store', 'ztitle', 'start');
+  CLOG = table(L.nodes, { x: 36, y: 444, w: 258, title: 'global_tx', cols: [['tx', 0], ['branch', 70], ['state', 160]], cellClass: stCls });
+  for (const p of PS) {
+    const cy = CY[p];
+    N[p] = node(L.nodes, { x: 520, y: cy, w: 170, h: 80, title: D[p].title, sub: D[p].svc });
+    el('rect', { x: 645, y: cy - 82, width: 335, height: 172, rx: 12, class: 'zone' }, L.zones);
+    txt(L.zones, 660, cy - 60, `${p}-db`, 'ztitle', 'start');
+    RESTXT[p] = txt(L.nodes, 660, cy - 40, '', 'lbl', 'start');
+    T[p] = table(L.nodes, { x: 660, y: cy - 18, w: 305, title: 'tcc_branch', cols: [['tx', 0], ['status', 80], ['note', 190]], cellClass: stCls, max: 3 });
+    T[p].onDraw = facts;
+  }
+}
+function stCls(c, j) {
+  if (j === 0) return '';
+  if (/^(TRIED|TRYING|LOCKED)/.test(c)) return 'st-warn';
+  if (/^(CONFIRMED|CONFIRM)/.test(c)) return 'st-ok';
+  if (/^(CANCELLED|CANCEL|REJECTED|FAILED)/.test(c)) return 'st-bad';
+  return '';
+}
+
+/* ---------- calls ---------- */
+function inspect(method, p, body) {
+  kv('#props', [['request', `POST /${p}/tcc/${method}`], ['host', D[p].svc], ['X-Tx-Id', CTX.gid], ['X-Branch-Id', `${CTX.gid}-${p}`]]);
+  $('#body').textContent = JSON.stringify(body, null, 2);
+}
+async function call(g, p, method, kind, { lost = false, slow = false } = {}) {
+  const body = method === 'try' ? (p === 'wallet' ? { userId: 'u-88', amount: 129.0 } : p === 'inventory' ? { sku: 'SKU-KB-0721', qty: 2 } : { code: 'SAVE10', userId: 'u-88' }) : {};
+  inspect(method, p, { txId: CTX.gid, branchId: `${CTX.gid}-${p}`, ...body });
+  const label = method[0].toUpperCase() + method.slice(1);
+  const tok = token(label, kind);
+  await travel(g, tok, P[p]);
+  if (lost) {
+    tok.setKind('fail'); tok.setLabel(label + ' ✗');
+    await sleep(g, 500);
+    tok.remove();
+    return false;
+  }
+  tok.remove();
+  return true;
+}
+async function reply(g, p, label, kind = 'reply', lost = false) {
+  const tok = token(label, kind);
+  await travel(g, tok, P[p], true);
+  if (lost) { tok.setKind('fail'); tok.setLabel('timeout'); await sleep(g, 400); }
+  tok.remove();
+}
+async function branchWrite(g, p, label) { await send(g, label, 'sql', P['l' + p]); }
+function setBranch(p, status, noteTxt, state = '') {
+  if (!B[p]) B[p] = T[p].add([CTX.gid, status, noteTxt], state);
+  else T[p].set(B[p], { cells: [CTX.gid, status, noteTxt], state });
+}
+function clog(p, state) {
+  const r = CTX.crow[p];
+  if (!r) CTX.crow[p] = CLOG.add([CTX.gid.slice(0, 7), p, state]);
+  else CLOG.set(r, { cells: [CTX.gid.slice(0, 7), p, state] });
+}
+
+/* participant handlers */
+async function doTry(g, p, { guard = true } = {}) {
+  N[p].set('try…', 'busy');
+  await sleep(g, 350);
+  if (B[p] && B[p].cells[1].startsWith('CANCELLED')) {
+    if (guard) {
+      await branchWrite(g, p, 'SELECT branch');
+      log('ok', 'guard', `${D[p].svc} finds a <code>CANCELLED</code> row for <code>${CTX.gid}</code> and rejects the late Try. Nothing is reserved. This is the anti-suspension check.`);
+      setBranch(p, 'CANCELLED', 'late Try rejected');
+      N[p].set('late Try rejected', 'ok');
+      return 'rejected';
+    }
+    log('bad', 'suspension', `${D[p].svc} doesn't check its branch table and reserves stock for a transaction that was already cancelled. Nobody will ever confirm or cancel it.`);
+  }
+  if (S.fault === 'try-fails' && p === 'inventory') {
+    await branchWrite(g, p, 'BEGIN; check');
+    log('bad', 'try failed', `inventory-svc: only ${RES.inventory.stock} unit left, cannot reserve 2. It records nothing and answers <code>409 Conflict</code>.`);
+    N[p].set('insufficient stock', 'bad');
+    return 'fail';
+  }
+  await branchWrite(g, p, 'BEGIN; reserve');
+  const r = RES[p];
+  if (p === 'wallet') { r.frozen += 129; }
+  else if (p === 'inventory') { r.reserved += 2; }
+  else { r.state = `locked by ${CTX.gid}`; }
+  drawRes(p);
+  setBranch(p, 'TRIED', D[p].what);
+  log('sql', 'try', `${D[p].svc}: <b>${D[p].what}</b> and insert <code>tcc_branch(${CTX.gid}, TRIED)</code> in one local transaction. The resource is reserved, not used.`);
+  N[p].set('TRIED · reserved', 'busy');
+  return 'ok';
+}
+async function doConfirm(g, p) {
+  N[p].set('confirm…', 'busy');
+  await sleep(g, 300);
+  if (B[p].cells[1] === 'CONFIRMED') {
+    await branchWrite(g, p, 'SELECT branch');
+    log('ok', 'idempotent', `${D[p].svc} already has <code>CONFIRMED</code> for this branch, so it answers OK without deducting again.`);
+    N[p].set('already confirmed', 'ok');
+    return;
+  }
+  await branchWrite(g, p, 'BEGIN; apply');
+  const r = RES[p];
+  if (p === 'wallet') { r.balance -= 129; r.frozen -= 129; }
+  else if (p === 'inventory') { r.stock -= 2; r.reserved -= 2; }
+  else { r.state = 'used'; }
+  drawRes(p);
+  setBranch(p, 'CONFIRMED', 'reservation applied');
+  log('ok', 'confirm', `${D[p].svc} turns the reservation into the real change and marks the branch <code>CONFIRMED</code>.`);
+  N[p].set('CONFIRMED', 'ok');
+}
+async function doCancel(g, p) {
+  N[p].set('cancel…', 'busy');
+  await sleep(g, 300);
+  await branchWrite(g, p, 'BEGIN; release');
+  if (!B[p]) {
+    setBranch(p, 'CANCELLED', 'empty cancel (no Try)');
+    log('comp', 'empty cancel', `${D[p].svc} has no branch row for <code>${CTX.gid}</code>: the Try never arrived. It inserts a <code>CANCELLED</code> marker and answers OK instead of 404, so the coordinator can finish.`);
+    N[p].set('empty cancel', 'ok');
+    return;
+  }
+  const r = RES[p];
+  if (p === 'wallet') { r.frozen -= 129; }
+  else if (p === 'inventory') { r.reserved -= 2; }
+  else { r.state = 'available'; }
+  drawRes(p);
+  setBranch(p, 'CANCELLED', 'reservation released');
+  log('comp', 'cancel', `${D[p].svc} releases the reservation and marks the branch <code>CANCELLED</code>.`);
+  N[p].set('CANCELLED', 'bad');
+}
+
+/* ---------- run ---------- */
+async function run(g) {
+  const F = S.fault;
+  CTX.status = 'TRYING'; facts();
+  N.client.set('POST /checkout', 'busy');
+  log('info', 'request', `Client checks out: 129.00 EUR, 2 × SKU-KB-0721, coupon SAVE10.`);
+  await send(g, 'checkout', 'cmd', P.req);
+  N.coord.set('BEGIN global tx', 'busy');
+  await send(g, 'insert', 'sql', P.clog);
+  PS.forEach(p => clog(p, 'TRYING'));
+  log('sql', 'begin', `Coordinator stores global transaction <code>${CTX.gid}</code> with three branches in state TRYING.`);
+  await checkpoint(g);
+
+  /* Phase 1: Try */
+  N.coord.set('phase 1 · Try', 'busy');
+  log('cmd', 'try', 'Coordinator calls <code>/try</code> on all three participants in parallel.');
+  const res = {};
+  await Promise.all(PS.map(async p => {
+    const lost = (F === 'empty-cancel' || F.startsWith('suspension')) && p === 'inventory';
+    const ok = await call(g, p, 'try', 'cmd', { lost });
+    if (!ok) { log('bad', 'lost', `The Try to inventory-svc is stuck in the network. inventory-svc hasn't seen it.`); res[p] = 'lost'; return; }
+    const r = await doTry(g, p);
+    res[p] = r;
+    await reply(g, p, r === 'ok' ? '200 OK' : '409', r === 'ok' ? 'reply' : 'fail');
+    clog(p, r === 'ok' ? 'TRIED' : 'TRY FAILED');
+  }));
+  await checkpoint(g);
+  if (res.inventory === 'lost') {
+    for (let s = 3; s > 0; s--) { N.coord.set(`waiting for inventory · ${s}s`, 'warn'); await sleep(g, 420); }
+    log('warn', 'timeout', 'No answer from inventory-svc within the Try timeout. The coordinator must assume it might or might not have reserved, so it cancels every branch.');
+  }
+  const ok = PS.every(p => res[p] === 'ok');
+  CTX.status = ok ? 'CONFIRMING' : 'CANCELLING';
+  await send(g, 'update', 'sql', P.clog);
+  log(ok ? 'ok' : 'comp', 'decision', ok ? 'All Tries succeeded. Coordinator records CONFIRMING; from here it retries Confirm until every branch answers.' : 'At least one Try failed or timed out. Coordinator records CANCELLING and retries Cancel until every branch answers.');
+  facts();
+  await checkpoint(g);
+
+  /* Phase 2 */
+  N.coord.set(ok ? 'phase 2 · Confirm' : 'phase 2 · Cancel', 'busy');
+  const targets = ok ? PS : PS.filter(p => !(F === 'try-fails' && p === 'inventory'));
+  await Promise.all(targets.map(async p => {
+    if (ok) {
+      const lostReply = F === 'confirm-timeout' && p === 'wallet';
+      await call(g, p, 'confirm', 'ok');
+      await doConfirm(g, p);
+      await reply(g, p, '200 OK', 'reply', lostReply);
+      if (lostReply) {
+        log('warn', 'timeout', 'The 200 OK from wallet-svc is lost on the way back. The coordinator can\'t tell whether the money moved, so it retries.');
+        for (let s = 2; s > 0; s--) { N.coord.set(`retry wallet in ${s}s`, 'warn'); await sleep(g, 420); }
+        await call(g, p, 'confirm', 'ok');
+        await doConfirm(g, p);
+        await reply(g, p, '200 OK');
+      }
+      clog(p, 'CONFIRMED');
+    } else {
+      await call(g, p, 'cancel', 'comp');
+      await doCancel(g, p);
+      await reply(g, p, '200 OK');
+      clog(p, 'CANCELLED');
+    }
+  }));
+  if (F === 'try-fails') clog('inventory', 'NOTHING TO DO');
+  CTX.status = ok ? 'CONFIRMED' : 'CANCELLED';
+  await send(g, 'update', 'sql', P.clog);
+  N.coord.set(CTX.status, ok ? 'ok' : 'bad');
+  log(ok ? 'ok' : 'comp', CTX.status.toLowerCase(), `Coordinator marks <code>${CTX.gid}</code> ${CTX.status}.`);
+  await send(g, ok ? '200 OK' : '409', ok ? 'reply' : 'fail', P.req, true);
+  N.client.set(ok ? 'order placed' : 'checkout failed', ok ? 'ok' : 'bad');
+  facts();
+  await checkpoint(g);
+
+  /* the late Try */
+  if (F.startsWith('suspension')) {
+    await sleep(g, 600);
+    log('warn', 'late Try', 'Much later, the original Try to inventory-svc finally gets through. It had been stuck in a retrying load balancer.');
+    inspect('try', 'inventory', { txId: CTX.gid, branchId: `${CTX.gid}-inventory`, sku: 'SKU-KB-0721', qty: 2 });
+    const tok = token('Try (late)', 'cmd');
+    await travel(g, tok, P.inventory);
+    tok.remove();
+    const r = await doTry(g, 'inventory', { guard: F === 'suspension-guarded' });
+    if (r === 'ok') N.inventory.set('reserved forever', 'bad');
+    await reply(g, 'inventory', r === 'ok' ? '200 OK' : '409', r === 'ok' ? 'reply' : 'fail');
+    if (r === 'ok') log('bad', 'ignored', `The coordinator has already finished <code>${CTX.gid}</code> and ignores this reply. 2 units stay reserved until someone notices.`);
+  }
+}
+
+const NOTES = {
+  none: 'All three reservations succeeded, so all three were confirmed. Between Try and Confirm the money and stock were set aside but not spent, and no database locks were held.',
+  'try-fails': 'One Try failed, so the coordinator cancelled the two that had succeeded. Nothing was ever spent, only reserved and released.',
+  'confirm-timeout': 'Confirm is retried until the coordinator hears back. Because wallet-svc checks its <code>tcc_branch</code> row first, the retry was a no-op instead of a double charge.',
+  'empty-cancel': 'inventory-svc got a Cancel for a Try it never saw. Answering OK and writing a <b>CANCELLED marker</b> let the coordinator finish, and the marker will matter if the Try turns up later.',
+  'suspension-guarded': 'The late Try hit the CANCELLED marker left by the empty cancel and was rejected. Empty-cancel handling and the anti-suspension check only work as a pair.',
+  'suspension-unguarded': '<b>Suspension.</b> The late Try reserved stock for a transaction that had already been cancelled. Nothing will ever confirm or cancel it, so 2 units are stuck until a reaper or a human releases them.',
+};
+function finish() {
+  const leak = RES.wallet.frozen > 0 || RES.inventory.reserved > 0 || RES.coupon.state.startsWith('locked');
+  const used = RES.wallet.balance < 500 && RES.coupon.state === 'used';
+  if (leak) { verdict('LEAKED RESERVATION', 'bad'); if (B.inventory) T.inventory.set(B.inventory, { state: 'bad' }); }
+  else if (used) verdict('CONSISTENT · CONFIRMED', 'ok');
+  else verdict('CONSISTENT · CANCELLED', 'neutral');
+  note(NOTES[S.fault]);
+  log(leak ? 'bad' : 'ok', leak ? 'leak' : 'consistent', NOTES[S.fault]);
+}
+
+function reset() {
+  CTX = { gid: 'tx-' + hex(4), status: 'NOT STARTED', crow: {} };
+  RES = { wallet: { balance: 500, frozen: 0 }, inventory: { stock: S.fault === 'try-fails' ? 1 : 10, reserved: 0 }, coupon: { state: 'available' } };
+  B = {};
+  build();
+  PS.forEach(drawRes);
+  kv('#props', [['—', 'Nothing sent yet']]);
+  $('#body').textContent = '—';
+  log('route', 'setup', `Three services, each with a <code>tcc_branch</code> table keyed by (tx, branch). Global transaction <code>${CTX.gid}</code>.`);
+}
+
+Sim.bindSelect('#fault', v => { S.fault = v; });
+Sim.init({ reset, run, finish });
+})();
+</script>

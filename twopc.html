@@ -1,0 +1,763 @@
+<title>Two-Phase Commit Simulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: control bar on top, coordinator + participants stage beside atomicity check + message inspector, trace underneath */
+:root {
+  --bg: #EDF0EE; --panel: #FFFFFF; --panel-2: #F5F7F6; --ink: #18211D; --muted: #5B6862;
+  --line: #BFC8C3; --line-2: #DDE3E0; --accent: #D9530A;
+  --k-cmd: #2C5BCB; --k-reply: #0D8576; --k-comp: #A93274; --k-fail: #C42B2B; --k-sql: #6A4BC4;
+  --ok: #23824F; --bad: #C42B2B; --warn: #A86E12; --on-k: #FFFFFF;
+  --f-display: 'Archivo', 'Arial Narrow', system-ui, sans-serif;
+  --f-body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --f-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0F1311; --panel: #171D1A; --panel-2: #1C2420; --ink: #E4EBE7; --muted: #8F9D96;
+    --line: #3A4741; --line-2: #26302B; --accent: #FF7A33;
+    --k-cmd: #7E9CFF; --k-reply: #3FC7B1; --k-comp: #E472B4; --k-fail: #FF6B6B; --k-sql: #A996FF;
+    --ok: #5CC48C; --bad: #FF6B6B; --warn: #E3B04F; --on-k: #0E1311; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0F1311; --panel: #171D1A; --panel-2: #1C2420; --ink: #E4EBE7; --muted: #8F9D96;
+  --line: #3A4741; --line-2: #26302B; --accent: #FF7A33;
+  --k-cmd: #7E9CFF; --k-reply: #3FC7B1; --k-comp: #E472B4; --k-fail: #FF6B6B; --k-sql: #A996FF;
+  --ok: #5CC48C; --bad: #FF6B6B; --warn: #E3B04F; --on-k: #0E1311; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 14px; line-height: 1.5; }
+.app { max-width: none; margin: 0; padding: 20px clamp(16px, 2vw, 32px) 40px; display: flex; flex-direction: column; gap: 16px; }
+code, .mono { font-family: var(--f-mono); font-size: 0.92em; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 8px 24px; }
+h1 { font-family: var(--f-display); font-weight: 800; font-size: 28px; letter-spacing: -0.01em; margin: 0; line-height: 1.1; text-wrap: balance; }
+h1 span { color: var(--accent); }
+header.top p { margin: 4px 0 0; color: var(--muted); max-width: min(70ch, 100%); }
+@media (min-width: 1700px) { header.top p { max-width: 120ch; } }
+h2 { font-family: var(--f-display); font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; margin: 0; color: var(--muted); }
+.pages { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.pages a { padding: 5px 12px; color: var(--ink); text-decoration: none; font-weight: 500; background: var(--panel-2); }
+.pages a + a { border-left: 1px solid var(--line); }
+.pages a[aria-current="page"] { background: var(--ink); color: var(--bg); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: end; background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 12px 14px; }
+.field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.field > span { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
+select, button { font: inherit; color: var(--ink); }
+select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 0; max-width: 100%; }
+.transport { display: flex; gap: 6px; }
+.btn { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px; cursor: pointer; font-weight: 500; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-k); min-width: 84px; }
+.btn:hover { filter: brightness(1.05); }
+button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.speed { display: flex; align-items: center; gap: 8px; }
+.speed input { accent-color: var(--accent); width: 120px; }
+.speed output { font-family: var(--f-mono); font-variant-numeric: tabular-nums; min-width: 3ch; }
+
+.grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+@media (min-width: 1120px) { .grid { grid-template-columns: minmax(0, 1fr) 360px; } .grid .log { grid-column: 1 / -1; } }
+@media (min-width: 1700px) { .grid { grid-template-columns: minmax(0, 1fr) 440px; } #log { max-height: 480px; } }
+.card { background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 14px; min-width: 0; }
+.stage-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; align-items: start; margin-bottom: 8px; }
+.stage-head p { margin: 4px 0 0; color: var(--muted); max-width: 72ch; font-size: 13px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px; }
+.legend span { font-family: var(--f-mono); font-size: 11px; padding: 2px 8px; border-radius: 999px; color: var(--on-k); }
+.svgwrap { overflow-x: auto; container-type: inline-size; }
+#topo { --ar: 0.600; width: 100%; min-width: 760px; height: min(calc(100cqw * var(--ar)), calc(100vh - 360px)); min-height: calc(760px * var(--ar)); display: block; }
+
+/* SVG */
+.edge { fill: none; stroke: var(--line); stroke-width: 1.5; transition: stroke 0.2s; }
+.edge.live { stroke: var(--live); stroke-width: 2.5; }
+.arrow { fill: var(--line); }
+.zone { fill: var(--panel-2); stroke: var(--line); stroke-width: 1.2; }
+.ztitle { font-family: var(--f-display); font-weight: 700; font-size: 14px; fill: var(--ink); }
+.locks { font-family: var(--f-mono); font-size: 10.5px; fill: var(--muted); }
+.locks.held { fill: var(--accent); font-weight: 500; }
+.waiter { font-family: var(--f-mono); font-size: 10.5px; fill: var(--accent); font-weight: 500; }
+.waiter.ok { fill: var(--ok); }
+.box { fill: var(--panel); stroke: var(--ink); stroke-width: 1.4; transition: stroke 0.2s, fill 0.2s; }
+.node .title { font-family: var(--f-display); font-weight: 700; font-size: 15px; fill: var(--ink); }
+.node .sub { font-family: var(--f-mono); font-size: 10.5px; fill: var(--muted); }
+.node .status { font-family: var(--f-body); font-size: 11.5px; fill: var(--muted); font-style: italic; }
+.node.busy .box { stroke: var(--accent); stroke-width: 2.2; }
+.node.busy .status { fill: var(--accent); }
+.node.ok .box { stroke: var(--ok); stroke-width: 2.2; }
+.node.ok .status { fill: var(--ok); font-style: normal; font-weight: 600; }
+.node.bad .box { stroke: var(--bad); stroke-width: 2.2; }
+.node.bad .status { fill: var(--bad); font-style: normal; font-weight: 600; }
+.node.doubt .box { stroke: var(--warn); stroke-width: 2.4; stroke-dasharray: 6 3; }
+.node.doubt .status { fill: var(--warn); font-style: normal; font-weight: 600; }
+.node.crash .box { stroke: var(--bad); stroke-width: 2.5; fill: var(--panel-2); }
+.node.crash .status { fill: var(--bad); font-style: normal; font-weight: 600; }
+.node.crash { animation: shake 0.4s 2; }
+@keyframes shake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+.tiny { font-family: var(--f-mono); font-size: 9.5px; fill: var(--muted); }
+.tok rect { stroke: var(--panel); stroke-width: 1.5; }
+.tok text { font-family: var(--f-mono); font-size: 10.5px; font-weight: 500; fill: var(--on-k); }
+
+/* Log tables drawn in SVG */
+.tname { font-family: var(--f-mono); font-size: 11px; font-weight: 500; fill: var(--ink); }
+.thead { font-family: var(--f-mono); font-size: 9.5px; fill: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.tline { stroke: var(--line); stroke-width: 1; }
+.tempty { font-family: var(--f-mono); font-size: 10.5px; fill: var(--muted); font-style: italic; }
+.tcell { font-family: var(--f-mono); font-size: 10.5px; fill: var(--ink); }
+.tcell.st-warn { fill: var(--warn); font-weight: 500; }
+.tcell.st-ok { fill: var(--ok); font-weight: 500; }
+.tcell.st-bad { fill: var(--bad); font-weight: 500; }
+.trow .tbg { fill: none; stroke: none; }
+.trow .hl { fill: var(--accent); opacity: 0; }
+.trow.flash .hl { animation: rowflash 1.1s ease-out; }
+@keyframes rowflash { from { opacity: 0.32; } to { opacity: 0; } }
+.trow.tx .tbg { stroke: var(--accent); stroke-dasharray: 3 3; }
+.trow.tx .tcell { fill: var(--muted); font-style: italic; }
+.trow.rolled .tcell { fill: var(--bad); text-decoration: line-through; }
+
+/* Side */
+.side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.check-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.pill { font-family: var(--f-mono); font-size: 11.5px; font-weight: 500; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.pill.run { border-color: var(--accent); color: var(--accent); }
+.pill.ok { background: var(--ok); border-color: var(--ok); color: var(--on-k); }
+.pill.neutral { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+.pill.bad { background: var(--bad); border-color: var(--bad); color: var(--on-k); }
+.pill.warn { background: var(--warn); border-color: var(--warn); color: var(--on-k); }
+.derived { margin: -4px 0 8px; font-size: 12px; color: var(--muted); }
+#note { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+#note:empty { display: none; }
+#note b { color: var(--ink); }
+dl.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; margin: 10px 0; font-size: 12px; }
+dl.kv dt { font-family: var(--f-mono); color: var(--muted); }
+dl.kv dd { margin: 0; font-family: var(--f-mono); overflow-wrap: anywhere; }
+.inspector pre { margin: 0; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 6px; padding: 8px 10px; font-family: var(--f-mono); font-size: 11.5px; overflow-x: auto; white-space: pre-wrap; max-height: 200px; }
+
+.log-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.log-head span { font-size: 12px; color: var(--muted); }
+#log { list-style: none; margin: 0; padding: 0; max-height: 340px; overflow-y: auto; font-size: 12.5px; border-top: 1px solid var(--line-2); }
+#log li { display: grid; grid-template-columns: 58px 118px minmax(0, 1fr); gap: 10px; padding: 5px 2px; border-bottom: 1px solid var(--line-2); align-items: baseline; }
+#log .t { font-family: var(--f-mono); color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11.5px; }
+#log .v { font-family: var(--f-mono); font-size: 11px; font-weight: 500; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); justify-self: start; white-space: nowrap; }
+#log .m { min-width: 0; overflow-wrap: anywhere; }
+#log code { background: var(--panel-2); padding: 0 4px; border-radius: 3px; }
+.v.sql { border-color: var(--k-sql) !important; color: var(--k-sql); }
+.v.msg { border-color: var(--k-cmd) !important; color: var(--k-cmd); }
+.v.phase { background: var(--k-cmd); border-color: var(--k-cmd) !important; color: var(--on-k); }
+.v.commit { background: var(--ok); border-color: var(--ok) !important; color: var(--on-k); }
+.v.rollback { background: var(--k-comp); border-color: var(--k-comp) !important; color: var(--on-k); }
+.v.nack, .v.crash { background: var(--bad); border-color: var(--bad) !important; color: var(--on-k); }
+.v.info { background: var(--ink); border-color: var(--ink) !important; color: var(--bg); }
+.v.warn { background: var(--warn); border-color: var(--warn) !important; color: var(--on-k); }
+.v.route { color: var(--muted); }
+@media (max-width: 640px) { #log li { grid-template-columns: 50px minmax(0, 1fr); } #log .m { grid-column: 1 / -1; } }
+
+.glossary { background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 14px; }
+.glossary dl { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: 12px 24px; margin: 12px 0 0; }
+.glossary dt { font-family: var(--f-mono); font-weight: 500; font-size: 12.5px; }
+.glossary dd { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+@media (prefers-reduced-motion: reduce) { .node.crash, .trow.flash .hl { animation: none; } }
+</style>
+
+<div class="app">
+  <header class="top">
+    <div>
+      <h1>Two-phase <span>commit</span></h1>
+      <p>One checkout touches three databases. A coordinator asks every participant to prepare, then tells all of them to commit or abort. Crash things at different points and see who is left holding locks, and for how long.</p>
+    </div>
+    <nav class="pages" aria-label="Simulations"><a href="index.html">← All simulators</a></nav>
+  </header>
+
+  <section class="controls" aria-label="Simulation controls">
+    <label class="field" for="fault"><span>Fault</span>
+      <select id="fault">
+        <option value="none">None</option>
+        <option value="vote-no">Inventory votes NO (stock would go negative)</option>
+        <option value="participant-timeout">Payments crashes before voting</option>
+        <option value="coord-crash-before" selected>Coordinator crashes before logging its decision</option>
+        <option value="coord-crash-mid">Coordinator crashes midway through phase 2</option>
+        <option value="participant-crash-prepared">Inventory crashes right after voting YES</option>
+        <option value="heuristic">Coordinator outage + operator rolls back inventory by hand</option>
+      </select>
+    </label>
+    <div class="field"><span>Playback</span>
+      <div class="transport">
+        <button id="play" class="btn primary" type="button">Run</button>
+        <button id="step" class="btn" type="button" title="Run until the next protocol step settles">Step</button>
+        <button id="reset" class="btn" type="button">Reset</button>
+      </div>
+    </div>
+    <div class="field"><span>Speed</span>
+      <div class="speed"><input id="speed" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Animation speed"><output id="speedOut">1×</output></div>
+    </div>
+  </section>
+
+  <main class="grid">
+    <section class="card stage">
+      <div class="stage-head">
+        <div>
+          <h2>Coordinator and participants</h2>
+          <p>The coordinator owns the decision and keeps it in its own log. Each participant is a Postgres database that supports <code>PREPARE TRANSACTION</code>. Inventory also has a second checkout, <b>tx-B</b>, waiting for the same stock row.</p>
+        </div>
+        <div class="legend" aria-label="Token colours">
+          <span style="background:var(--k-cmd)">work · PREPARE</span>
+          <span style="background:var(--k-reply)">vote YES · ACK</span>
+          <span style="background:var(--ok)">COMMIT</span>
+          <span style="background:var(--k-comp)">ABORT</span>
+          <span style="background:var(--k-fail)">failure</span>
+          <span style="background:var(--k-sql)">log write</span>
+        </div>
+      </div>
+      <div class="svgwrap"><svg id="topo" viewBox="0 0 1000 600" role="img" aria-label="Client, coordinator with its decision log, and three participant databases with their write-ahead logs and locks"></svg></div>
+    </section>
+
+    <aside class="side">
+      <section class="card check">
+        <div class="check-head"><h2>Atomicity check</h2><span id="verdict" class="pill">NOT STARTED</span></div>
+        <p class="derived">Invariant: all three databases commit, or none of them do.</p>
+        <dl id="facts" class="kv"></dl>
+        <p id="note"></p>
+      </section>
+      <section class="card inspector">
+        <h2>Last message</h2>
+        <dl id="props" class="kv"><dt>—</dt><dd>Nothing sent yet</dd></dl>
+        <pre id="body">—</pre>
+      </section>
+    </aside>
+
+    <section class="card log">
+      <div class="log-head"><h2>Trace</h2><span>Protocol messages and log writes, in the order they happen</span></div>
+      <ol id="log"></ol>
+    </section>
+  </main>
+
+  <section class="glossary">
+    <h2>Terms used here</h2>
+    <dl>
+      <div><dt>Coordinator · participant</dt><dd>The coordinator (transaction manager) runs the protocol and owns the decision. Participants (resource managers) are the databases doing the work.</dd></div>
+      <div><dt>Phase 1: PREPARE / vote</dt><dd>Each participant makes its changes durable without making them visible, keeps its locks, and votes YES. A YES is a promise to commit if told to, even after a crash.</dd></div>
+      <div><dt>Phase 2: COMMIT / ABORT</dt><dd>If every vote is YES the coordinator decides COMMIT, otherwise ABORT, and tells every prepared participant. Participants ACK so the coordinator can forget the transaction.</dd></div>
+      <div><dt>Commit point</dt><dd>The moment the coordinator's decision record reaches disk. Before it, the transaction can still abort; after it, it will commit whatever crashes next.</dd></div>
+      <div><dt>In doubt</dt><dd>A participant that has voted YES but not heard the decision. It can't commit (someone else may have voted NO) and can't abort (the coordinator may have decided COMMIT).</dd></div>
+      <div><dt>Blocking</dt><dd>While participants are in doubt they keep their locks, so other transactions on those rows wait until the coordinator comes back. This is 2PC's main weakness.</dd></div>
+      <div><dt>Presumed abort</dt><dd>If the coordinator's log has no decision for a transaction, it is treated as aborted. That's what lets a recovering coordinator answer in-doubt participants.</dd></div>
+      <div><dt>Heuristic decision</dt><dd>Committing or rolling back an in-doubt transaction by hand (<code>COMMIT PREPARED</code> / <code>ROLLBACK PREPARED</code>) to free locks. If the guess disagrees with the coordinator, atomicity is lost.</dd></div>
+      <div><dt>XA</dt><dd>The standard interface for 2PC between a transaction manager and resource managers. Every participant has to support prepare, so a card network or HTTP API can't take part. That's one reason sagas exist.</dd></div>
+    </dl>
+  </section>
+</div>
+
+<script>
+(() => {
+const NS = 'http://www.w3.org/2000/svg';
+const $ = s => document.querySelector(s);
+const PS = ['orders', 'payments', 'inventory'];
+const CY = { orders: 100, payments: 300, inventory: 500 };
+const OFF = { orders: -24, payments: 0, inventory: 24 };
+const D = {
+  orders: { title: 'Orders', db: 'orders-db', work: 'INSERT order',
+    rec: c => `INSERT orders ${c.orderId}`, sql: c => `INSERT INTO orders (id, amount) VALUES ('${c.orderId}', 129.00)`, lock: c => `orders(${c.orderId})` },
+  payments: { title: 'Payments', db: 'payments-db', work: 'UPDATE wallet',
+    rec: () => 'UPDATE wallets u-88 −129.00', sql: () => `UPDATE wallets SET balance = balance - 129.00 WHERE user_id = 'u-88'`, lock: () => 'wallets(u-88)' },
+  inventory: { title: 'Inventory', db: 'inventory-db', work: 'UPDATE stock',
+    rec: () => 'UPDATE stock SKU-KB-0721 −2', sql: () => `UPDATE stock SET qty = qty - 2 WHERE sku = 'SKU-KB-0721'`, lock: () => 'stock(SKU-KB-0721)' },
+};
+const who = id => id === 'coord' ? 'coordinator' : id === 'client' ? 'client' : D[id].db;
+
+const S = { fault: 'coord-crash-before', speed: 1 };
+const RUN = { gen: 0, playing: false, stepping: false, running: false, done: false, simT: 0 };
+const CANCEL = Symbol('cancel');
+let TOKLAYER, CASE, P, DATA, WAIT, PATH = {}, NODE = {}, TABLE = {}, LOCK = {}, WAITER;
+
+const hex = n => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function txt(parent, x, y, s, cls, anchor = 'middle') {
+  const t = el('text', { x, y, class: cls, 'text-anchor': anchor }, parent);
+  t.textContent = s;
+  return t;
+}
+
+/* ---------- Topology ---------- */
+function render() {
+  const svg = $('#topo');
+  svg.innerHTML = '';
+  PATH = {}; NODE = {}; TABLE = {}; LOCK = {};
+  const defs = el('defs', {}, svg);
+  const mk = el('marker', { id: 'arr', viewBox: '0 0 8 8', refX: 7, refY: 4, markerWidth: 6, markerHeight: 6, orient: 'auto' }, defs);
+  el('path', { d: 'M0 0 L8 4 L0 8 z', class: 'arrow' }, mk);
+  const gZ = el('g', {}, svg), gE = el('g', {}, svg), gN = el('g', {}, svg);
+  TOKLAYER = el('g', {}, svg);
+
+  const paths = { req: 'M140 145 V248', clog: 'M140 350 V398' };
+  for (const p of PS) {
+    const y0 = 300 + OFF[p], cy = CY[p];
+    paths[`c:${p}`] = `M230 ${y0} C 340 ${y0}, 340 ${cy}, 453 ${cy}`;
+    paths[`w:${p}`] = `M625 ${cy} H688`;
+  }
+  for (const [id, d] of Object.entries(paths)) PATH[id] = el('path', { d, class: 'edge', 'marker-end': 'url(#arr)' }, gE);
+
+  el('rect', { x: 30, y: 400, width: 300, height: 190, rx: 12, class: 'zone' }, gZ);
+  txt(gZ, 46, 426, 'coordinator log', 'ztitle', 'start');
+  TABLE.coord = { x: 46, y: 446, w: 268, title: 'decisions (fsync on every write)', cols: [['lsn', 0], ['record', 36]], g: el('g', {}, gN) };
+
+  const nodes = [
+    { id: 'client', title: 'Client', sub: 'POST /checkout', x: 140, y: 110, w: 160, h: 70 },
+    { id: 'coord', title: 'Coordinator', sub: 'transaction manager', x: 140, y: 300, w: 180, h: 100 },
+    ...PS.map(p => ({ id: p, title: D[p].title, sub: 'participant', x: 540, y: CY[p], w: 170, h: 84 })),
+  ];
+  for (const n of nodes) {
+    const g = el('g', { class: 'node' }, gN);
+    el('rect', { x: n.x - n.w / 2, y: n.y - n.h / 2, width: n.w, height: n.h, rx: 10, class: 'box' }, g);
+    const big = n.h > 80;
+    txt(g, n.x, n.y - (big ? 16 : 10), n.title, 'title');
+    txt(g, n.x, n.y + (big ? 2 : 6), n.sub, 'sub');
+    const st = txt(g, n.x, n.y + (big ? 26 : 24), 'idle', 'status');
+    NODE[n.id] = { g, st };
+  }
+  for (const p of PS) {
+    const cy = CY[p];
+    el('rect', { x: 690, y: cy - 80, width: 285, height: 170, rx: 12, class: 'zone' }, gZ);
+    txt(gZ, 704, cy - 58, D[p].db, 'ztitle', 'start');
+    LOCK[p] = txt(gN, 704, cy - 38, 'locks: none', 'locks', 'start');
+    TABLE[p] = { x: 704, y: cy - 14, w: 256, title: 'wal', cols: [['lsn', 0], ['record', 36]], g: el('g', {}, gN) };
+  }
+  WAITER = txt(gN, 540, 562, '', 'waiter');
+  for (const id of Object.keys(TABLE)) drawTable(id);
+}
+
+const cellCls = c => /^(PREPARE|BEGIN)/.test(c) ? 'st-warn' : /^(COMMIT|DECISION COMMIT|END)/.test(c) ? 'st-ok' : /^(ROLLBACK|DECISION ABORT|HEURISTIC)/.test(c) ? 'st-bad' : '';
+function drawTable(id) {
+  const t = TABLE[id], g = t.g;
+  while (g.firstChild) g.firstChild.remove();
+  txt(g, t.x, t.y, t.title, 'tname', 'start');
+  t.cols.forEach(([h, x]) => txt(g, t.x + x, t.y + 18, h, 'thead', 'start'));
+  el('line', { x1: t.x, x2: t.x + t.w, y1: t.y + 24, y2: t.y + 24, class: 'tline' }, g);
+  const rows = DATA[id];
+  if (!rows.length) txt(g, t.x, t.y + 40, '(empty)', 'tempty', 'start');
+  rows.forEach((r, i) => {
+    const y = t.y + 40 + i * 18;
+    const rg = el('g', { class: 'trow' + (r.state ? ' ' + r.state : '') }, g);
+    el('rect', { x: t.x - 5, y: y - 13, width: t.w + 10, height: 17, rx: 3, class: 'tbg' }, rg);
+    el('rect', { x: t.x - 5, y: y - 13, width: t.w + 10, height: 17, rx: 3, class: 'hl' }, rg);
+    r.cells.forEach((c, j) => txt(rg, t.x + t.cols[j][1], y, c, 'tcell' + (j && !r.state && cellCls(c) ? ' ' + cellCls(c) : ''), 'start'));
+    if (r.flash) { rg.classList.add('flash'); r.flash = false; }
+  });
+  facts();
+}
+function addRow(id, rec, state = '') {
+  const r = { t: id, cells: [String(DATA[id].length + 1), rec], state, flash: true };
+  DATA[id].push(r);
+  drawTable(id);
+  return r;
+}
+function setRow(r, patch = {}) { Object.assign(r, patch, { flash: true }); drawTable(r.t); }
+
+function setNode(id, text, cls = '') {
+  const n = NODE[id]; if (!n) return;
+  n.g.setAttribute('class', 'node' + (cls ? ' ' + cls : ''));
+  if (text != null) n.st.textContent = text;
+}
+function setP(p, state, text, cls) { P[p].state = state; setNode(p, text, cls); facts(); }
+function setLock(p, held) {
+  P[p].locked = held;
+  LOCK[p].textContent = held ? `locks: ${D[p].lock(CASE)} · exclusive` : 'locks: none';
+  LOCK[p].setAttribute('class', 'locks' + (held ? ' held' : ''));
+  facts();
+}
+
+/* ---------- Timing ---------- */
+const active = () => RUN.playing || RUN.stepping;
+(function clock() {
+  let last = performance.now();
+  (function tick(now) {
+    const dt = Math.min(64, now - last); last = now;
+    if (active()) RUN.simT += dt * S.speed;
+    requestAnimationFrame(tick);
+  })(last);
+})();
+function sleep(g, ms) {
+  return new Promise((res, rej) => {
+    let t = 0, last = performance.now();
+    (function tick(now) {
+      if (g !== RUN.gen) return rej(CANCEL);
+      const dt = Math.min(64, now - last); last = now;
+      if (active()) t += dt * S.speed;
+      if (t >= ms) res(); else requestAnimationFrame(tick);
+    })(last);
+  });
+}
+async function checkpoint(g) {
+  if (RUN.stepping) { RUN.stepping = false; syncControls(); }
+  while (!active()) { await new Promise(r => requestAnimationFrame(r)); if (g !== RUN.gen) throw CANCEL; }
+}
+function makeToken(label, kind) {
+  const g = el('g', { class: 'tok', visibility: 'hidden' }, TOKLAYER);
+  const w = label.length * 6.4 + 18;
+  const rect = el('rect', { x: -w / 2, y: -10, width: w, height: 20, rx: 10 }, g);
+  txt(g, 0, 4, label, '');
+  const tok = { el: g, color: '', setKind(k) { this.color = k === 'ok' ? 'var(--ok)' : `var(--k-${k})`; rect.setAttribute('style', `fill:${this.color}`); } };
+  tok.setKind(kind);
+  return tok;
+}
+function travel(g, tok, id, reverse = false) {
+  const p = PATH[id];
+  const len = p.getTotalLength();
+  p.style.setProperty('--live', tok.color);
+  p.classList.add('live');
+  const place = d => { const pt = p.getPointAtLength(reverse ? len - d : d); tok.el.setAttribute('transform', `translate(${pt.x},${pt.y})`); };
+  place(0); tok.el.setAttribute('visibility', 'visible');
+  return new Promise((res, rej) => {
+    let d = 0, last = performance.now();
+    (function tick(now) {
+      if (g !== RUN.gen) return rej(CANCEL);
+      const dt = Math.min(64, now - last); last = now;
+      if (active()) d += dt * 0.34 * S.speed;
+      place(Math.min(d, len));
+      if (d >= len) { p.classList.remove('live'); res(); } else requestAnimationFrame(tick);
+    })(last);
+  });
+}
+async function localWrite(g, label, p) {
+  const tok = makeToken(label, 'sql');
+  await travel(g, tok, p === 'coord' ? 'clog' : `w:${p}`);
+  tok.el.remove();
+}
+const fan = (ps, fn) => Promise.all(ps.map(fn));
+
+/* ---------- Panels ---------- */
+function log(cls, verb, html) {
+  const li = document.createElement('li');
+  li.innerHTML = `<span class="t">${(RUN.simT / 1000).toFixed(1)}s</span><span class="v ${cls}">${verb}</span><span class="m">${html}</span>`;
+  const ol = $('#log');
+  ol.appendChild(li);
+  ol.scrollTop = ol.scrollHeight;
+}
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+function inspect(m) {
+  const rows = [['type', m.type], ['gid', CASE.gid], ['from', m.from], ['to', m.to]];
+  $('#props').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('');
+  $('#body').textContent = m.sql || '—';
+}
+function facts() {
+  if (!P || !DATA) return;
+  const pState = p => P[p].down ? 'DOWN' : P[p].state;
+  const rows = [['decision', CASE.decision || 'none yet'], ...PS.map(p => [D[p].db, pState(p) + (P[p].locked ? ' · locks held' : '')])];
+  rows.push(['tx-B wait', WAIT.t0 == null ? 'not started' : `${(WAIT.ms / 1000).toFixed(1)}s${WAIT.done ? ' (got the lock)' : ' and counting'}`]);
+  $('#facts').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('');
+}
+function setVerdict(text, cls) { const p = $('#verdict'); p.className = 'pill ' + cls; p.textContent = text; }
+function note(html) { $('#note').innerHTML = html; }
+
+/* ---------- Protocol pieces ---------- */
+async function msg(g, from, to, label, kind, sql) {
+  const path = from === 'client' || to === 'client' ? 'req' : `c:${from === 'coord' ? to : from}`;
+  const rev = from === 'coord' && to === 'client' || from !== 'coord' && from !== 'client';
+  inspect({ type: label, from: who(from), to: who(to), sql });
+  const tok = makeToken(label, kind);
+  await travel(g, tok, path, rev);
+  if (P[to] && P[to].down) {
+    tok.setKind('fail');
+    log('nack', 'unreachable', `${who(to)} is down, so <code>${label}</code> doesn't arrive.`);
+    await travel(g, tok, path, !rev);
+    tok.el.remove();
+    return false;
+  }
+  tok.el.remove();
+  return true;
+}
+async function logC(g, rec) {
+  await localWrite(g, 'fsync', 'coord');
+  addRow('coord', rec);
+}
+async function finishP(g, p, decision) {
+  const commit = decision === 'COMMIT', gid = CASE.gid;
+  const stmt = `${commit ? 'COMMIT' : 'ROLLBACK'} PREPARED '${gid}'`;
+  await msg(g, 'coord', p, commit ? 'COMMIT' : 'ABORT', commit ? 'ok' : 'comp', stmt + ';');
+  await localWrite(g, commit ? 'COMMIT PREPARED' : 'ROLLBACK PREPARED', p);
+  setRow(DATA[p][0], { state: commit ? '' : 'rolled' });
+  addRow(p, stmt);
+  setLock(p, false);
+  setP(p, commit ? 'COMMITTED' : 'ABORTED', commit ? 'COMMITTED' : 'ABORTED', commit ? 'ok' : 'bad');
+  log(commit ? 'commit' : 'rollback', commit ? 'COMMIT' : 'ROLLBACK', `${D[p].db}: <code>${stmt}</code>. Locks on <code>${D[p].lock(CASE)}</code> released.`);
+  await msg(g, p, 'coord', 'ACK', 'reply');
+}
+async function inDoubt(g, ps, secs) {
+  setVerdict('IN DOUBT', 'warn');
+  ps.forEach(p => setNode(p, 'PREPARED · in doubt', 'doubt'));
+  const names = ps.map(p => D[p].db).join(', ');
+  log('warn', 'blocked', `${names} ${ps.length > 1 ? 'are' : 'is'} prepared and in doubt. ${ps.length > 1 ? 'They' : 'It'} can't commit (another participant might have voted NO) and can't abort (the coordinator might have decided COMMIT), so ${ps.length > 1 ? 'they keep their' : 'it keeps its'} locks and wait${ps.length > 1 ? '' : 's'}.`);
+  for (let s = secs; s > 0; s--) { setNode('coord', `down · back in ${s}s`, 'crash'); await sleep(g, 650); }
+  setVerdict('RUNNING', 'run');
+}
+async function countdown(g, id, fmt, secs, cls) {
+  for (let s = secs; s > 0; s--) { setNode(id, fmt(s), cls); await sleep(g, 420); }
+}
+
+/* tx-B: a second checkout that needs the same stock row */
+async function waiter(g) {
+  const frame = () => new Promise((res, rej) => requestAnimationFrame(() => g === RUN.gen ? res() : rej(CANCEL)));
+  while (!P.inventory.locked) await frame();
+  await sleep(g, 500);
+  if (!P.inventory.locked) return;
+  WAIT.t0 = RUN.simT;
+  log('route', 'tx-B', `Another checkout, tx-B, runs <code>UPDATE stock … WHERE sku = 'SKU-KB-0721'</code> on inventory-db and blocks on the row lock.`);
+  let lastFacts = 0;
+  while (P.inventory.locked && !RUN.done) {
+    WAIT.ms = RUN.simT - WAIT.t0;
+    WAITER.textContent = `tx-B waiting for stock row · ${(WAIT.ms / 1000).toFixed(1)}s`;
+    WAITER.setAttribute('class', 'waiter');
+    if (WAIT.ms - lastFacts > 200) { lastFacts = WAIT.ms; facts(); }
+    await frame();
+  }
+  WAIT.done = true;
+  WAITER.textContent = `tx-B got the lock after ${(WAIT.ms / 1000).toFixed(1)}s`;
+  WAITER.setAttribute('class', 'waiter ok');
+  facts();
+  log('route', 'tx-B', `The stock row lock is released and tx-B proceeds after waiting <b>${(WAIT.ms / 1000).toFixed(1)} s</b>.`);
+}
+
+/* ---------- The run ---------- */
+async function run(g) {
+  const F = S.fault, gid = CASE.gid;
+  setVerdict('RUNNING', 'run');
+  setNode('client', 'POST /checkout', 'busy');
+  log('info', 'request', `Client sends <code>POST /checkout</code> for order <b>${CASE.orderId}</b>: create the order, debit 129.00 from the wallet, reserve 2 × SKU-KB-0721.`);
+  await msg(g, 'client', 'coord', 'checkout', 'cmd');
+  setNode('client', 'waiting', 'busy');
+  setNode('coord', 'BEGIN', 'busy');
+  await logC(g, `BEGIN ${gid}`);
+  log('sql', 'log', `Coordinator assigns global transaction id <code>${gid}</code> and writes it to its log.`);
+  await checkpoint(g);
+
+  setNode('coord', 'sending work', 'busy');
+  await fan(PS, async p => {
+    await msg(g, 'coord', p, D[p].work, 'cmd', `BEGIN;\n${D[p].sql(CASE)};`);
+    await localWrite(g, 'BEGIN; ' + D[p].work.split(' ')[0], p);
+    addRow(p, D[p].rec(CASE), 'tx');
+    setLock(p, true);
+    setP(p, 'ACTIVE', 'ACTIVE · locks held', 'busy');
+    log('sql', 'BEGIN', `${D[p].db}: <code>BEGIN; ${D[p].sql(CASE)}</code> takes a row lock on <code>${D[p].lock(CASE)}</code>.`);
+    await sleep(g, 300);
+    await msg(g, p, 'coord', 'done', 'reply');
+  });
+  await checkpoint(g);
+
+  /* Phase 1 */
+  setNode('coord', 'phase 1 · collecting votes', 'busy');
+  log('phase', 'phase 1', `Coordinator sends <code>PREPARE</code> to all three. A participant that votes YES promises it can commit no matter what, and gives up the right to decide on its own.`);
+  const votes = {};
+  await fan(PS, async p => {
+    await msg(g, 'coord', p, 'PREPARE', 'cmd', `PREPARE TRANSACTION '${gid}';`);
+    if (F === 'participant-timeout' && p === 'payments') {
+      P[p].down = true;
+      setLock(p, false);
+      setP(p, 'DOWN', 'process killed', 'crash');
+      log('crash', 'SIGKILL', `payments-db crashes on receiving PREPARE, before writing anything. It never votes.`);
+      return;
+    }
+    if (F === 'vote-no' && p === 'inventory') {
+      log('nack', 'check failed', `inventory-db: the deferred check <code>qty >= 0</code> fails because only 1 unit is left. It can't promise to commit, so it rolls back and votes NO.`);
+      await localWrite(g, 'ROLLBACK', p);
+      setRow(DATA[p][0], { state: 'rolled' });
+      addRow(p, 'ROLLBACK');
+      setLock(p, false);
+      setP(p, 'ABORTED', 'ABORTED · voted NO', 'bad');
+      await msg(g, p, 'coord', 'VOTE NO', 'fail');
+      votes[p] = 'NO';
+      return;
+    }
+    await localWrite(g, 'PREPARE', p);
+    addRow(p, `PREPARE TRANSACTION '${gid}'`);
+    setP(p, 'PREPARED', 'PREPARED · locks held', 'busy');
+    log('sql', 'PREPARE', `${D[p].db}: <code>PREPARE TRANSACTION '${gid}'</code> is fsync'd. The changes survive a crash, stay invisible, and keep their locks until the decision arrives.`);
+    await msg(g, p, 'coord', 'VOTE YES', 'reply');
+    votes[p] = 'YES';
+    if (F === 'participant-crash-prepared' && p === 'inventory') {
+      P[p].down = true;
+      setP(p, 'PREPARED', 'process killed', 'crash');
+      log('crash', 'SIGKILL', `inventory-db crashes right after sending its YES vote. The prepared transaction is safe in its WAL.`);
+    }
+  });
+  await checkpoint(g);
+
+  if (F === 'participant-timeout') {
+    await countdown(g, 'coord', s => `waiting for payments · ${s}s`, 5, 'busy');
+    log('warn', 'timeout', `No vote from payments-db within 5 s. Before voting, a participant may still abort on its own, so the coordinator can safely treat silence as NO.`);
+  }
+  const allYes = PS.every(p => votes[p] === 'YES');
+  let decision = allYes ? 'COMMIT' : 'ABORT';
+  if (F === 'coord-crash-before' && allYes) {
+    setNode('coord', 'process killed', 'crash');
+    log('crash', 'SIGKILL', `Coordinator has three YES votes but crashes before writing its decision.`);
+    await inDoubt(g, PS, 7);
+    setNode('coord', 'restarted · reading log', 'busy');
+    log('info', 'recovery', `Coordinator restarts and scans its log: <code>BEGIN ${gid}</code> and no decision. Under presumed abort, no decision means ABORT.`);
+    await sleep(g, 700);
+    decision = 'ABORT';
+  }
+  CASE.decision = decision;
+  await logC(g, `DECISION ${decision}`);
+  log(decision === 'COMMIT' ? 'commit' : 'rollback', 'decision', decision === 'COMMIT'
+    ? `Coordinator fsyncs <code>DECISION COMMIT</code>. <b>This is the commit point</b>: from here on the transaction commits, whatever crashes next.`
+    : `Coordinator fsyncs <code>DECISION ABORT</code>.`);
+  await checkpoint(g);
+
+  /* Phase 2 */
+  const targets = PS.filter(p => votes[p] === 'YES');
+  setNode('coord', `phase 2 · ${decision}`, 'busy');
+  log('phase', 'phase 2', targets.length
+    ? `Coordinator sends <code>${decision}</code> to every participant that voted YES: ${targets.map(p => D[p].db).join(', ')}.`
+    : `No participant is prepared, so there is nothing to tell.`);
+  let hazard = false;
+  if (decision === 'COMMIT' && (F === 'coord-crash-mid' || F === 'heuristic')) {
+    const first = F === 'coord-crash-mid' ? ['orders'] : ['orders', 'payments'];
+    const left = targets.filter(p => !first.includes(p));
+    await fan(first, p => finishP(g, p, 'COMMIT'));
+    setNode('coord', 'process killed', 'crash');
+    log('crash', 'SIGKILL', `Coordinator crashes after telling ${first.map(p => D[p].db).join(' and ')} to commit, before reaching ${left.map(p => D[p].db).join(' and ')}.`);
+    await inDoubt(g, left, F === 'heuristic' ? 4 : 5);
+    if (F === 'heuristic') {
+      log('warn', 'operator', `inventory-db has held its lock for a long time and checkouts are piling up. An operator finds the transaction in <code>pg_prepared_xacts</code>, can't reach the coordinator, and runs <code>ROLLBACK PREPARED '${gid}'</code>.`);
+      await localWrite(g, 'ROLLBACK PREPARED', 'inventory');
+      setRow(DATA.inventory[0], { state: 'rolled' });
+      addRow('inventory', `ROLLBACK PREPARED '${gid}'`);
+      setLock('inventory', false);
+      setP('inventory', 'ABORTED', 'ABORTED · by hand', 'bad');
+      await sleep(g, 1200);
+      setNode('coord', 'restarted · reading log', 'busy');
+      log('info', 'recovery', `Coordinator restarts, finds <code>DECISION COMMIT</code> with no <code>END</code>, and resends COMMIT to inventory-db.`);
+      await msg(g, 'coord', 'inventory', 'COMMIT', 'ok', `COMMIT PREPARED '${gid}';`);
+      log('nack', 'ERROR', `inventory-db: <code>prepared transaction with identifier "${gid}" does not exist</code>. The operator guessed wrong.`);
+      await msg(g, 'inventory', 'coord', 'ERROR', 'fail');
+      await logC(g, `HEURISTIC HAZARD ${gid}`);
+      setNode('coord', 'heuristic hazard', 'bad');
+      hazard = true;
+    } else {
+      setNode('coord', 'restarted · reading log', 'busy');
+      log('info', 'recovery', `Coordinator restarts, finds <code>DECISION COMMIT</code> with no <code>END</code>, and resends COMMIT to every participant that hasn't ACKed.`);
+      await sleep(g, 500);
+      await fan(left, p => finishP(g, p, 'COMMIT'));
+    }
+  } else if (decision === 'COMMIT' && F === 'participant-crash-prepared') {
+    await fan(targets, async p => {
+      if (p !== 'inventory') return finishP(g, p, 'COMMIT');
+      await msg(g, 'coord', p, 'COMMIT', 'ok', `COMMIT PREPARED '${gid}';`);
+    });
+    await countdown(g, 'coord', s => `retrying inventory in ${s}s`, 4, 'bad');
+    P.inventory.down = false;
+    setP('inventory', 'PREPARED', 'recovered · PREPARED', 'doubt');
+    log('info', 'recovery', `inventory-db restarts and replays its WAL. It finds <code>PREPARE TRANSACTION '${gid}'</code> with no outcome, so the transaction comes back prepared (listed in <code>pg_prepared_xacts</code>) and its locks are taken again.`);
+    await sleep(g, 700);
+    setNode('coord', 'retrying COMMIT', 'busy');
+    await finishP(g, 'inventory', 'COMMIT');
+  } else {
+    await fan(targets, p => finishP(g, p, decision));
+  }
+
+  if (F === 'participant-timeout') {
+    await sleep(g, 400);
+    P.payments.down = false;
+    setRow(DATA.payments[0], { state: 'rolled' });
+    addRow('payments', 'ROLLBACK (crash recovery)');
+    setP('payments', 'ABORTED', 'restarted · rolled back', 'bad');
+    log('info', 'recovery', `payments-db restarts. Its WAL has no PREPARE for <code>${gid}</code>, so crash recovery rolls the unfinished transaction back.`);
+  }
+  await checkpoint(g);
+
+  if (!hazard) {
+    await logC(g, `END ${gid}`);
+    log('sql', 'END', `All prepared participants have ACKed, so the coordinator writes <code>END</code> and can forget <code>${gid}</code>.`);
+    setNode('coord', decision === 'COMMIT' ? 'committed' : 'aborted', decision === 'COMMIT' ? 'ok' : 'bad');
+  }
+  const okResp = decision === 'COMMIT';
+  await msg(g, 'coord', 'client', okResp ? '200 OK' : '409 Aborted', okResp ? 'ok' : 'comp');
+  setNode('client', okResp ? '200 OK' : '409 Aborted', okResp ? 'ok' : 'bad');
+}
+
+/* ---------- Verdict ---------- */
+const NOTES = {
+  none: `Both phases ran cleanly. The cost is in the timing: every participant held its locks from its first write until <code>COMMIT PREPARED</code> arrived, and tx-B waited the whole time.`,
+  'vote-no': `One NO is enough. The coordinator logged ABORT and rolled back the participants that had prepared. Atomic, and nobody was left in doubt because the coordinator stayed up.`,
+  'participant-timeout': `A missing vote counts as NO. A participant that hasn't voted yet is still free to abort on its own, so a timeout in phase 1 is always safe.`,
+  'coord-crash-before': `This is why 2PC is called a <b>blocking</b> protocol. Once prepared, the participants couldn't finish without the coordinator, so their locks stayed held and tx-B waited through the whole outage. With no decision in its log, the recovering coordinator presumed abort.`,
+  'coord-crash-mid': `The commit point is the fsync of the decision record, not the COMMIT messages. orders-db committed before the crash while the others waited in doubt; on recovery the coordinator found COMMIT in its log and finished the job.`,
+  'participant-crash-prepared': `<code>PREPARE TRANSACTION</code> is durable, so the crashed participant came back with the transaction still prepared and its locks taken again. The coordinator kept retrying COMMIT until it got through.`,
+  heuristic: `<b>Atomicity lost.</b> Someone freed the locks by hand while inventory-db was in doubt and guessed wrong. Orders and payments committed, inventory rolled back, so the customer paid for stock that was never reserved. Heuristic decisions trade atomicity for availability and have to be reconciled manually.`,
+};
+function finish() {
+  const st = PS.map(p => P[p].state);
+  let text, cls;
+  if (st.every(s => s === 'COMMITTED')) { text = 'ATOMIC · COMMITTED'; cls = 'ok'; }
+  else if (st.every(s => s === 'ABORTED')) { text = 'ATOMIC · ABORTED'; cls = 'neutral'; }
+  else { text = 'NOT ATOMIC · HEURISTIC MIXED'; cls = 'bad'; }
+  setVerdict(text, cls);
+  note(NOTES[S.fault]);
+  log(cls === 'bad' ? 'nack' : cls === 'ok' ? 'commit' : 'rollback', text.split(' ·')[0].toLowerCase(), NOTES[S.fault]);
+}
+
+/* ---------- Controls ---------- */
+function reset() {
+  RUN.gen++;
+  Object.assign(RUN, { playing: false, stepping: false, running: false, done: false, simT: 0 });
+  const orderId = 'ord-' + (1040 + Math.floor(Math.random() * 60));
+  CASE = { orderId, gid: 'tx-' + hex(4), decision: null };
+  P = Object.fromEntries(PS.map(p => [p, { state: 'IDLE', locked: false, down: false }]));
+  DATA = { coord: [], orders: [], payments: [], inventory: [] };
+  WAIT = { t0: null, ms: 0, done: false };
+  render();
+  facts();
+  setVerdict('NOT STARTED', '');
+  note('');
+  $('#log').innerHTML = '';
+  $('#props').innerHTML = '<dt>—</dt><dd>Nothing sent yet</dd>';
+  $('#body').textContent = '—';
+  log('route', 'setup', `Three Postgres databases with <code>max_prepared_transactions &gt; 0</code>, one coordinator with a durable log. Global transaction id <code>${CASE.gid}</code>.`);
+  syncControls();
+}
+function startRun() {
+  if (RUN.running) return;
+  RUN.running = true;
+  const g = RUN.gen;
+  waiter(g).catch(e => { if (e !== CANCEL) console.error(e); });
+  run(g).then(() => {
+    if (g !== RUN.gen) return;
+    finish();
+    Object.assign(RUN, { running: false, playing: false, stepping: false, done: true });
+    syncControls();
+  }).catch(e => { if (e !== CANCEL) console.error(e); });
+}
+function play() {
+  if (RUN.done) reset();
+  if (RUN.running && RUN.playing) { RUN.playing = false; syncControls(); return; }
+  RUN.playing = true;
+  startRun();
+  syncControls();
+}
+function stepOnce() {
+  if (RUN.done) reset();
+  RUN.playing = false;
+  RUN.stepping = true;
+  startRun();
+  syncControls();
+}
+function syncControls() {
+  $('#play').textContent = RUN.done ? 'Replay' : RUN.playing ? 'Pause' : RUN.running ? 'Resume' : 'Run';
+}
+
+$('#play').addEventListener('click', play);
+$('#step').addEventListener('click', stepOnce);
+$('#reset').addEventListener('click', reset);
+$('#fault').addEventListener('change', e => { S.fault = e.target.value; reset(); play(); });
+$('#speed').addEventListener('input', e => { S.speed = +e.target.value; $('#speedOut').textContent = S.speed + '×'; });
+
+S.fault = $('#fault').value;
+reset();
+setTimeout(play, 500);
+})();
+</script>

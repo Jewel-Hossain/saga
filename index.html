@@ -1,0 +1,239 @@
+<title>Distributed Transaction Simulators</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: header, simulator cards grouped by problem area, a suggested path, then the full pattern coverage table */
+:root {
+  --bg: #EDF0EE; --panel: #FFFFFF; --panel-2: #F5F7F6; --ink: #18211D; --muted: #5B6862;
+  --line: #BFC8C3; --line-2: #DDE3E0; --accent: #D9530A;
+  --k-cmd: #2C5BCB; --k-evt: #D9600E; --k-reply: #0D8576; --k-comp: #A93274; --k-sql: #6A4BC4; --k-dead: #6A7074; --k-warn: #A86E12; --k-ok: #23824F; --k-fail: #C42B2B;
+  --on-k: #FFFFFF;
+  --f-display: 'Archivo', 'Arial Narrow', system-ui, sans-serif;
+  --f-body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --f-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0F1311; --panel: #171D1A; --panel-2: #1C2420; --ink: #E4EBE7; --muted: #8F9D96;
+    --line: #3A4741; --line-2: #26302B; --accent: #FF7A33;
+    --k-cmd: #7E9CFF; --k-evt: #FF8A45; --k-reply: #3FC7B1; --k-comp: #E472B4; --k-sql: #A996FF; --k-dead: #9AA1A5; --k-warn: #E3B04F; --k-ok: #5CC48C; --k-fail: #FF6B6B;
+    --on-k: #0E1311; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0F1311; --panel: #171D1A; --panel-2: #1C2420; --ink: #E4EBE7; --muted: #8F9D96;
+  --line: #3A4741; --line-2: #26302B; --accent: #FF7A33;
+  --k-cmd: #7E9CFF; --k-evt: #FF8A45; --k-reply: #3FC7B1; --k-comp: #E472B4; --k-sql: #A996FF; --k-dead: #9AA1A5; --k-warn: #E3B04F; --k-ok: #5CC48C; --k-fail: #FF6B6B;
+  --on-k: #0E1311; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 14px; line-height: 1.5; }
+.app { padding: 20px clamp(16px, 2vw, 32px) 40px; display: flex; flex-direction: column; gap: 28px; }
+code { font-family: var(--f-mono); font-size: 0.92em; background: var(--panel-2); padding: 0 4px; border-radius: 3px; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 8px 24px; }
+h1 { font-family: var(--f-display); font-weight: 800; font-size: 32px; letter-spacing: -0.01em; margin: 0; line-height: 1.1; text-wrap: balance; }
+h1 span { color: var(--accent); }
+header.top p { margin: 6px 0 0; color: var(--muted); max-width: min(82ch, 100%); font-size: 15px; }
+.count { font-family: var(--f-mono); font-size: 12px; color: var(--muted); }
+h2 { font-family: var(--f-display); font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 4px; color: var(--muted); }
+.group > p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+
+.sims { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 16px; }
+.sim { --c: var(--accent); display: flex; flex-direction: column; gap: 10px; background: var(--panel); border: 1px solid var(--line-2); border-top: 4px solid var(--c); border-radius: 10px; padding: 16px 16px 14px; color: inherit; text-decoration: none; transition: border-color 0.15s, transform 0.15s; }
+.sim:hover { border-color: var(--c); transform: translateY(-2px); }
+.sim:hover .open { color: var(--c); }
+.sim .num { font-family: var(--f-mono); font-size: 11px; color: var(--muted); }
+.sim h3 { font-family: var(--f-display); font-weight: 800; font-size: 21px; margin: 0; line-height: 1.15; }
+.sim .tech { font-family: var(--f-mono); font-size: 11.5px; color: var(--c); font-weight: 500; margin-top: 2px; }
+.sim p { margin: 0; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: auto; padding-top: 4px; }
+.chips span { font-family: var(--f-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.open { font-weight: 600; font-size: 13px; transition: color 0.15s; }
+@media (prefers-reduced-motion: reduce) { .sim, .sim:hover { transition: none; transform: none; } }
+
+.panel { background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 16px; }
+.panel h2 { margin-bottom: 12px; }
+.path { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px 20px; counter-reset: p; }
+.path li { counter-increment: p; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 2px 8px; }
+.path li::before { content: counter(p); grid-row: span 2; font-family: var(--f-display); font-weight: 800; font-size: 20px; color: var(--accent); line-height: 1.2; }
+.path a { color: var(--ink); font-weight: 600; text-decoration-color: var(--line); text-underline-offset: 3px; }
+.path a:hover { text-decoration-color: var(--accent); }
+.path span { color: var(--muted); font-size: 13px; }
+
+.tablewrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); padding: 6px 12px 6px 0; border-bottom: 1px solid var(--line); }
+td { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+td:first-child { font-weight: 600; white-space: nowrap; }
+td:nth-child(2) { color: var(--muted); }
+tr.cat td { font-family: var(--f-display); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--accent); padding-top: 18px; border-bottom-color: var(--line); }
+td a { display: inline-block; font-family: var(--f-mono); font-size: 11px; padding: 1px 7px; margin: 0 4px 3px 0; border-radius: 4px; border: 1px solid var(--line); color: var(--ink); text-decoration: none; white-space: nowrap; }
+td a:hover { border-color: var(--accent); color: var(--accent); }
+@media (max-width: 640px) { td:first-child { white-space: normal; } }
+</style>
+
+<div class="app">
+  <header class="top">
+    <div>
+      <h1>Distributed transaction <span>simulators</span></h1>
+      <p>Interactive animations of how services stay consistent when work spans several databases and a message broker, and of the messaging patterns that make it reliable. Every simulator lets you break things on purpose and watch what the system does about it.</p>
+    </div>
+    <span class="count">10 simulators · 34 patterns</span>
+  </header>
+
+  <section class="group" aria-labelledby="g1">
+    <h2 id="g1">Transactions across services</h2>
+    <p>One business operation, several databases: how to end up all-or-nothing.</p>
+    <div class="sims">
+      <a class="sim" href="rabbitmq.html" style="--c: var(--k-cmd)">
+        <div><span class="num">01</span><h3>Saga over RabbitMQ</h3><div class="tech">exchanges, bindings &amp; queues</div></div>
+        <p>An order moves through payment, inventory and shipping as local transactions. Fail a step and watch the compensations run in reverse, with orchestration or choreography.</p>
+        <div class="chips"><span>orchestration</span><span>choreography</span><span>compensations</span><span>redelivery</span><span>poison → DLX</span></div>
+        <span class="open">Open simulator →</span>
+      </a>
+      <a class="sim" href="kafka.html" style="--c: var(--k-evt)">
+        <div><span class="num">02</span><h3>Saga over Kafka</h3><div class="tech">partitions, offsets &amp; consumer groups</div></div>
+        <p>The same saga on a log instead of queues. Records stay put while each consumer group moves its own offset, so crashes mean replays rather than redeliveries.</p>
+        <div class="chips"><span>keyed partitions</span><span>consumer lag</span><span>rebalance</span><span>poison → DLT</span><span>idempotent producer</span></div>
+        <span class="open">Open simulator →</span>
+      </a>
+      <a class="sim" href="twopc.html" style="--c: var(--k-comp)">
+        <div><span class="num">03</span><h3>Two-phase commit</h3><div class="tech">coordinator + 3 Postgres participants</div></div>
+        <p>One checkout touches three databases that all commit or all abort. Crash the coordinator or a participant and see who is left holding locks, and for how long.</p>
+        <div class="chips"><span>PREPARE / vote</span><span>commit point</span><span>in doubt</span><span>blocking</span><span>heuristic outcome</span></div>
+        <span class="open">Open simulator →</span>
+      </a>
+      <a class="sim" href="tcc.html" style="--c: var(--k-warn)">
+        <div><span class="num">04</span><h3>Try · Confirm · Cancel</h3><div class="tech">business reservations instead of locks</div></div>
+        <p>Every service first reserves (freeze money, hold stock), then confirms or cancels. Lose a Try, lose a reply, or let a late Try arrive after its Cancel.</p>
+        <div class="chips"><span>reservations</span><span>idempotent confirm</span><span>empty cancel</span><span>suspension</span></div>
+        <span class="open">Open simulator →</span>
+      </a>
+    </div>
+  </section>
+
+  <section class="group" aria-labelledby="g2">
+    <h2 id="g2">Getting events out of the database</h2>
+    <p>Making "the data changed" and "the event was published" impossible to separate.</p>
+    <div class="sims">
+      <a class="sim" href="outbox.html" style="--c: var(--k-reply)">
+        <div><span class="num">05</span><h3>Transactional outbox</h3><div class="tech">dual write vs outbox vs CDC</div></div>
+        <p>Saving an order and publishing its event can't share a transaction. Compare dual writes, an outbox with a polling relay, and an outbox read from the WAL by a CDC connector.</p>
+        <div class="chips"><span>lost event</span><span>ghost event</span><span>polling relay</span><span>CDC / log tailing</span><span>dedupe</span></div>
+        <span class="open">Open simulator →</span>
+      </a>
+      <a class="sim" href="eventsourcing.html" style="--c: var(--k-sql)">
+        <div><span class="num">06</span><h3>Event sourcing</h3><div class="tech">event store, projections &amp; snapshots</div></div>
+        <p>State is the list of events. Watch commands rebuild the order by replay, race each other on the stream version, and fix a broken read model by replaying history.</p>
+        <div class="chips"><span>rehydration</span><span>optimistic concurrency</span><span>snapshots</span><span>projection rebuild</span></div>
+        <span class="open">Open simulator →</span>
+      </a>
+    </div>
+  </section>
+
+  <section class="group" aria-labelledby="g3">
+    <h2 id="g3">Delivery guarantees</h2>
+    <p>What happens to a message when something fails, and how many times its effect lands.</p>
+    <div class="sims">
+      <a class="sim" href="retries.html" style="--c: var(--k-dead)">
+        <div><span class="num">07</span><h3>Retries, delays &amp; TTL</h3><div class="tech">RabbitMQ delay queues &amp; parking lot</div></div>
+        <p>Retry failed messages later without blocking the queue, give up after N attempts, park poison messages, and expire stale ones. Plus the requeue loop to avoid.</p>
+        <div class="chips"><span>TTL → DLX delay</span><span>backoff tiers</span><span>parking lot</span><span>message TTL</span><span>hot loop</span></div>
+        <span class="open">Open simulator →</span>
+      </a>
+      <a class="sim" href="eos.html" style="--c: var(--k-ok)">
+        <div><span class="num">08</span><h3>Kafka exactly-once</h3><div class="tech">transactions &amp; zombie fencing</div></div>
+        <p>A consume-transform-produce processor crashes or pauses mid-record. Compare plain at-least-once with transactions, and see what <code>read_uncommitted</code> lets through.</p>
+        <div class="chips"><span>transactional.id</span><span>commit markers</span><span>read_committed</span><span>fencing</span></div>
+        <span class="open">Open simulator →</span>
+      </a>
+    </div>
+  </section>
+
+  <section class="group" aria-labelledby="g4">
+    <h2 id="g4">Routing and flow control</h2>
+    <p>Who gets which message, in what order, and how fast.</p>
+    <div class="sims">
+      <a class="sim" href="workqueue.html" style="--c: var(--k-cmd)">
+        <div><span class="num">09</span><h3>Work queue</h3><div class="tech">competing consumers &amp; flow control</div></div>
+        <p>Several workers share one queue. See prefetch decide who gets work, priority jobs jump ahead, a full queue push back on its producer, and a token bucket protect an API.</p>
+        <div class="chips"><span>prefetch</span><span>priority queue</span><span>backpressure</span><span>rate limiting</span></div>
+        <span class="open">Open simulator →</span>
+      </a>
+      <a class="sim" href="eip.html" style="--c: var(--k-evt)">
+        <div><span class="num">10</span><h3>Integration patterns</h3><div class="tech">scatter-gather, routing slip, claim check</div></div>
+        <p>Ask three suppliers and combine their quotes before a timeout, let an order carry its own route, and move an 8 MB invoice without pushing it through the broker.</p>
+        <div class="chips"><span>aggregator</span><span>completion condition</span><span>routing slip</span><span>claim check</span></div>
+        <span class="open">Open simulator →</span>
+      </a>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="path-h">
+    <h2 id="path-h">Where to start</h2>
+    <ol class="path">
+      <li><a href="rabbitmq.html">Saga · RabbitMQ</a><span>The core idea: local transactions plus compensations instead of one big transaction.</span></li>
+      <li><a href="outbox.html">Outbox</a><span>The piece every saga step relies on: getting the event out without losing it.</span></li>
+      <li><a href="retries.html">Retries &amp; TTL</a><span>What to do with the messages that fail once they're out.</span></li>
+      <li><a href="twopc.html">2PC</a> → <a href="tcc.html">TCC</a><span>The alternatives sagas are usually compared with, and what they cost.</span></li>
+    </ol>
+  </section>
+
+  <section class="panel" aria-labelledby="cov-h">
+    <h2 id="cov-h">Every pattern, and where to see it</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Pattern</th><th>What it solves</th><th>Shown in</th></tr></thead>
+        <tbody>
+          <tr class="cat"><td colspan="3">Distributed transactions and consistency</td></tr>
+          <tr><td>Saga, orchestration</td><td>A coordinator sends commands and compensates on failure</td><td><a href="rabbitmq.html">Saga · RabbitMQ</a><a href="kafka.html">Saga · Kafka</a></td></tr>
+          <tr><td>Saga, choreography</td><td>Services react to each other's events with no coordinator</td><td><a href="rabbitmq.html">Saga · RabbitMQ</a><a href="kafka.html">Saga · Kafka</a></td></tr>
+          <tr><td>Transactional outbox</td><td>Saves to the DB and publishes an event without dual-write loss</td><td><a href="outbox.html">Outbox</a></td></tr>
+          <tr><td>Inbox / idempotent consumer</td><td>Turns duplicate deliveries into no-ops</td><td><a href="outbox.html">Outbox</a><a href="kafka.html">Saga · Kafka</a><a href="tcc.html#fault=confirm-timeout">TCC</a></td></tr>
+          <tr><td>Two-phase commit</td><td>Atomic commit across databases (blocking)</td><td><a href="twopc.html">2PC</a></td></tr>
+          <tr><td>Transaction log tailing (CDC)</td><td>Publishes from the DB's change log instead of polling</td><td><a href="outbox.html">Outbox · CDC strategy</a></td></tr>
+          <tr><td>Event sourcing</td><td>State is the log of events; rebuild by replay</td><td><a href="eventsourcing.html#scenario=lifecycle">Event sourcing</a><a href="eventsourcing.html#scenario=rebuild">projection rebuild</a></td></tr>
+          <tr><td>TCC (Try-Confirm-Cancel)</td><td>Reserve resources, then confirm or cancel</td><td><a href="tcc.html#fault=none">TCC</a><a href="tcc.html#fault=suspension-unguarded">suspension</a></td></tr>
+
+          <tr class="cat"><td colspan="3">Delivery and reliability</td></tr>
+          <tr><td>At-least-once + ack after processing</td><td>Messages aren't lost when a consumer crashes</td><td><a href="rabbitmq.html">Saga · RabbitMQ</a><a href="kafka.html">Saga · Kafka</a><a href="eos.html#mode=alo&amp;fault=crash">Exactly-once</a></td></tr>
+          <tr><td>Publisher confirms / acks=all</td><td>The producer knows the broker stored the message</td><td><a href="rabbitmq.html">Saga · RabbitMQ</a><a href="outbox.html">Outbox</a><a href="kafka.html">Saga · Kafka</a></td></tr>
+          <tr><td>Idempotent producer</td><td>Retries don't create duplicates</td><td><a href="kafka.html">Saga · Kafka</a></td></tr>
+          <tr><td>Dead letter queue / topic</td><td>Parks poison messages instead of looping forever</td><td><a href="rabbitmq.html">Saga · RabbitMQ</a><a href="kafka.html">Saga · Kafka</a><a href="retries.html#scenario=poison">Retries</a></td></tr>
+          <tr><td>Retry with backoff</td><td>Handles temporary failures</td><td><a href="retries.html#scenario=transient">Retries</a><a href="outbox.html">Outbox</a></td></tr>
+          <tr><td>Delayed retry queue (TTL → DLX)</td><td>Retries later without blocking the consumer</td><td><a href="retries.html#scenario=transient">Retries</a><a href="retries.html#scenario=exhausted">exhausted</a><a href="retries.html#scenario=requeue">vs requeue</a></td></tr>
+          <tr><td>Exactly-once (Kafka transactions)</td><td>Consume, process and produce atomically</td><td><a href="eos.html#mode=eos&amp;fault=crash">Exactly-once</a><a href="eos.html#mode=eos&amp;fault=zombie">fencing</a></td></tr>
+          <tr><td>Message expiration (TTL)</td><td>Drops stale messages</td><td><a href="retries.html#scenario=ttl">Retries · TTL</a></td></tr>
+
+          <tr class="cat"><td colspan="3">Routing and topology</td></tr>
+          <tr><td>Point-to-point (work queue)</td><td>One consumer handles each message</td><td><a href="workqueue.html#scenario=fair">Work queue</a><a href="rabbitmq.html">Saga · RabbitMQ</a></td></tr>
+          <tr><td>Publish-subscribe</td><td>Every subscriber gets a copy</td><td><a href="rabbitmq.html">Saga · RabbitMQ</a><a href="kafka.html">Saga · Kafka</a><a href="eip.html#scenario=sg-all">Scatter-gather</a></td></tr>
+          <tr><td>Topic / content-based routing</td><td>Routes by key pattern or content</td><td><a href="rabbitmq.html">Saga · RabbitMQ</a></td></tr>
+          <tr><td>Request-reply</td><td>RPC over messaging with <code>correlation_id</code> and <code>reply_to</code></td><td><a href="rabbitmq.html">Saga · RabbitMQ</a><a href="eip.html#scenario=sg-all">Scatter-gather</a></td></tr>
+          <tr><td>Competing consumers</td><td>Scales out by sharing one queue</td><td><a href="workqueue.html#scenario=fair">Work queue</a><a href="kafka.html">Saga · Kafka</a></td></tr>
+          <tr><td>Partitioning by key</td><td>Keeps ordering per entity</td><td><a href="kafka.html">Saga · Kafka</a></td></tr>
+          <tr><td>Message filter</td><td>Consumer ignores irrelevant messages</td><td><a href="kafka.html">Saga · Kafka (choreography)</a></td></tr>
+          <tr><td>Scatter-gather / aggregator</td><td>Fans out, then combines the replies</td><td><a href="eip.html#scenario=sg-all">Integration</a><a href="eip.html#scenario=sg-timeout">with timeout</a></td></tr>
+          <tr><td>Routing slip</td><td>The message carries its own itinerary</td><td><a href="eip.html#scenario=rs-review">Integration</a></td></tr>
+
+          <tr class="cat"><td colspan="3">Flow control and ordering</td></tr>
+          <tr><td>Prefetch / backpressure</td><td>Stops consumers being flooded and producers outrunning them</td><td><a href="workqueue.html#scenario=hoard">prefetch</a><a href="workqueue.html#scenario=backpressure">backpressure</a></td></tr>
+          <tr><td>Ordered processing per key</td><td>Avoids races on one entity</td><td><a href="kafka.html">Saga · Kafka</a></td></tr>
+          <tr><td>Head-of-line blocking avoidance</td><td>One bad message doesn't stall the rest</td><td><a href="kafka.html">Saga · Kafka</a><a href="retries.html#scenario=requeue">Retries</a></td></tr>
+          <tr><td>Priority queue</td><td>Urgent work goes first</td><td><a href="workqueue.html#scenario=priority">Work queue</a></td></tr>
+          <tr><td>Throttling / rate limiting</td><td>Protects downstream services</td><td><a href="workqueue.html#scenario=throttle-off">without</a><a href="workqueue.html#scenario=throttle-on">with token bucket</a></td></tr>
+
+          <tr class="cat"><td colspan="3">Message shape</td></tr>
+          <tr><td>Command vs event vs reply</td><td>Separates intent, fact and response</td><td><a href="rabbitmq.html">Saga · RabbitMQ</a><a href="kafka.html">Saga · Kafka</a></td></tr>
+          <tr><td>Event-carried state transfer</td><td>The event carries enough data to act without calling back</td><td><a href="rabbitmq.html">Saga · RabbitMQ</a><a href="kafka.html">Saga · Kafka</a></td></tr>
+          <tr><td>Claim check</td><td>Stores a large payload elsewhere and sends a reference</td><td><a href="eip.html#scenario=cc-inline">inline (fails)</a><a href="eip.html#scenario=cc-claim">claim check</a></td></tr>
+          <tr><td>Correlation identifier</td><td>Ties related messages together</td><td><a href="rabbitmq.html">Saga · RabbitMQ</a><a href="eip.html#scenario=sg-timeout">Scatter-gather</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>

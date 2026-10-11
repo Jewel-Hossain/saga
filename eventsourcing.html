@@ -1,0 +1,393 @@
+<title>Event Sourcing Simulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="assets/sim.css">
+
+<div class="app">
+  <header class="top">
+    <div>
+      <h1>Event <span>sourcing</span></h1>
+      <p>The order isn't stored as a row. It's stored as the list of things that happened to it, and the current state is whatever you get by replaying that list. Commands are checked against the replayed state, accepted ones become new events, and read models are built by projecting the same events.</p>
+    </div>
+    <nav class="pages" aria-label="Simulations"><a href="index.html">← All simulators</a></nav>
+  </header>
+
+  <section class="controls" aria-label="Simulation controls">
+    <label class="field" for="scenario"><span>Scenario</span>
+      <select id="scenario">
+        <option value="lifecycle">Order lifecycle</option>
+        <option value="rejected">Command rejected by the aggregate</option>
+        <option value="concurrency" selected>Two commands race (optimistic concurrency)</option>
+        <option value="snapshot">Long stream → snapshot</option>
+        <option value="rebuild">Fix a buggy projection by replaying</option>
+      </select>
+    </label>
+    <div class="field"><span>Playback</span>
+      <div class="transport">
+        <button id="play" class="btn primary" type="button">Run</button>
+        <button id="step" class="btn" type="button" title="Run until the next command settles">Step</button>
+        <button id="reset" class="btn" type="button">Reset</button>
+      </div>
+    </div>
+    <div class="field"><span>Speed</span>
+      <div class="speed"><input id="speed" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Animation speed"><output id="speedOut">1×</output></div>
+    </div>
+  </section>
+
+  <main class="grid">
+    <section class="card stage">
+      <div class="stage-head">
+        <div>
+          <h2>Command side · event store · read side</h2>
+          <p>The aggregate keeps no state between commands: it reloads the stream every time. Projections subscribe to the store and keep a checkpoint of the last version they have applied.</p>
+        </div>
+        <div class="legend" aria-label="Token colours">
+          <span style="background:var(--k-cmd)">command</span>
+          <span style="background:var(--k-evt)">event</span>
+          <span style="background:var(--k-sql)">read / replay</span>
+          <span style="background:var(--k-fail)">rejected</span>
+        </div>
+      </div>
+      <div class="svgwrap"><svg id="topo" viewBox="0 0 1000 600" style="--ar:0.6" role="img" aria-label="Command handler with rebuilt aggregate state, an event store stream with snapshots, and two projections"></svg></div>
+    </section>
+
+    <aside class="side">
+      <section class="card">
+        <div class="check-head"><h2>Outcome</h2><span id="verdict" class="pill">NOT STARTED</span></div>
+        <p class="derived">The event stream is the source of truth; everything else on screen can be rebuilt from it.</p>
+        <dl id="facts" class="kv"></dl>
+        <p id="note"></p>
+      </section>
+      <section class="card">
+        <h2>Last event</h2>
+        <pre class="body" id="body">—</pre>
+      </section>
+    </aside>
+
+    <section class="card log">
+      <div class="log-head"><h2>Trace</h2><span>Commands, reads, appends and projection updates</span></div>
+      <ol id="log"></ol>
+    </section>
+  </main>
+
+  <section class="glossary">
+    <h2>Terms used here</h2>
+    <dl>
+      <div><dt>Event store · stream</dt><dd>An append-only log of events per aggregate (here <code>order-1042</code>). Events are never updated or deleted; corrections are new events.</dd></div>
+      <div><dt>Aggregate · rehydration</dt><dd>The object that enforces the business rules. To handle a command it replays its stream from the start (or from a snapshot) to rebuild its current state.</dd></div>
+      <div><dt>Optimistic concurrency</dt><dd>Every append says which version it expects the stream to be at. If someone else appended first, the store rejects it with <code>WrongExpectedVersion</code> and the handler reloads and tries again.</dd></div>
+      <div><dt>Snapshot</dt><dd>A cached copy of the aggregate state at some version. Loading becomes "snapshot + events after it" instead of the full stream. It's an optimisation and can always be thrown away.</dd></div>
+      <div><dt>Projection · read model</dt><dd>A query-friendly table built by applying events in order. It is eventually consistent and owns a checkpoint saying how far it has read.</dd></div>
+      <div><dt>Replay</dt><dd>Reset a projection's checkpoint to 0 and apply every event again. That's how bugs in read models are fixed and how new read models are built from old history.</dd></div>
+      <div><dt>CQRS</dt><dd>Separating the write model (aggregate + events) from the read models (projections). Event sourcing almost always comes with it.</dd></div>
+    </dl>
+  </section>
+</div>
+
+<script src="assets/sim.js"></script>
+<script>
+(() => {
+const { $, txt, el, sleep, checkpoint, stage, path, node, table, token, travel, send, log, verdict, note, kv } = Sim;
+const ORDER = 'ord-1042';
+let S = { scenario: 'concurrency' };
+let N, P, EV, SNAP, SUM, REV, STATE_TXT, CK, ST, EVENTS, SNAPS, PROJ, STATS;
+
+/* ---------- domain ---------- */
+const empty = () => ({ status: 'NEW', items: {}, discount: 0, paid: 0, version: 0 });
+function total(s) { const sub = Object.values(s.items).reduce((a, i) => a + i.qty * i.price, 0); return +(sub * (1 - s.discount / 100)).toFixed(2); }
+function apply(s, e) {
+  const n = { ...s, items: { ...s.items }, version: e.v };
+  switch (e.type) {
+    case 'OrderPlaced': n.status = 'PLACED'; break;
+    case 'ItemAdded': n.items[e.data.sku] = { qty: (n.items[e.data.sku]?.qty || 0) + e.data.qty, price: e.data.price }; break;
+    case 'ItemRemoved': { const it = n.items[e.data.sku]; if (it) { it.qty -= e.data.qty; if (it.qty <= 0) delete n.items[e.data.sku]; } break; }
+    case 'DiscountApplied': n.discount = e.data.pct; break;
+    case 'PaymentConfirmed': n.status = 'PAID'; n.paid = e.data.amount; break;
+    case 'OrderShipped': n.status = 'SHIPPED'; break;
+  }
+  return n;
+}
+function decide(s, cmd) {
+  switch (cmd.name) {
+    case 'PlaceOrder': return s.status === 'NEW' ? [{ type: 'OrderPlaced', data: { customer: 'u-88' } }] : 'order already exists';
+    case 'AddItem': return s.status === 'PLACED' ? [{ type: 'ItemAdded', data: cmd.args }] : `can't add items to a ${s.status} order`;
+    case 'RemoveItem': return s.status === 'PLACED' ? [{ type: 'ItemRemoved', data: cmd.args }] : `can't remove items from a ${s.status} order`;
+    case 'ApplyDiscount': return s.status === 'PLACED' ? [{ type: 'DiscountApplied', data: cmd.args }] : `can't discount a ${s.status} order`;
+    case 'ConfirmPayment': return s.status !== 'PLACED' ? `can't pay a ${s.status} order`
+      : cmd.args.amount !== total(s) ? `payment of ${cmd.args.amount.toFixed(2)} doesn't match the total ${total(s).toFixed(2)}`
+      : [{ type: 'PaymentConfirmed', data: cmd.args }];
+    case 'Ship': return s.status === 'PAID' ? [{ type: 'OrderShipped', data: { carrier: 'DHL' } }] : `can't ship: order is ${s.status}, not PAID`;
+  }
+}
+const dataStr = e => e.type === 'ItemAdded' || e.type === 'ItemRemoved' ? `${e.data.sku.replace('SKU-', '')} ×${e.data.qty}${e.data.price ? ' @' + e.data.price.toFixed(2) : ''}`
+  : e.type === 'DiscountApplied' ? `${e.data.pct}%` : e.type === 'PaymentConfirmed' ? e.data.amount.toFixed(2) : e.type === 'OrderShipped' ? e.data.carrier : e.data.customer || '';
+
+/* ---------- topology ---------- */
+function build() {
+  const L = stage($('#topo'));
+  N = {}; P = {};
+  N.client = node(L.nodes, { x: 110, y: 70, w: 170, h: 64, title: 'Clients', sub: 'send commands' });
+  N.agg = node(L.nodes, { x: 110, y: 250, w: 180, h: 96, title: 'Order aggregate', sub: 'command handler' });
+  P.cmd = path(L.edges, 'M110 102 V200');
+  P.append = path(L.edges, 'M200 238 H353');
+  P.load = path(L.edges, 'M353 268 H202');
+  el('rect', { x: 15, y: 330, width: 300, height: 255, rx: 12, class: 'zone' }, L.zones);
+  txt(L.zones, 30, 354, 'state rebuilt for this command', 'ztitle', 'start');
+  ST = [0, 1, 2, 3, 4, 5].map(i => txt(L.nodes, 30, 384 + i * 22, '', 'lbl', 'start'));
+
+  el('rect', { x: 355, y: 20, width: 300, height: 565, rx: 12, class: 'zone' }, L.zones);
+  txt(L.zones, 370, 44, 'event store', 'ztitle', 'start');
+  txt(L.zones, 640, 44, `stream ${ORDER}`, 'zsub', 'end');
+  EV = table(L.nodes, { x: 370, y: 64, w: 270, title: 'events (append-only)', cols: [['ver', 0], ['type', 30], ['data', 150]], gap: 17, max: 20, cellClass: (c, j) => j === 1 ? (/Rejected/.test(c) ? 'st-bad' : 'st-warn') : '' });
+  SNAP = table(L.nodes, { x: 370, y: 482, w: 270, title: 'snapshots', cols: [['ver', 0], ['state', 34]], gap: 17, max: 3 });
+
+  el('rect', { x: 690, y: 20, width: 295, height: 270, rx: 12, class: 'zone' }, L.zones);
+  txt(L.zones, 705, 44, 'read model', 'ztitle', 'start');
+  el('rect', { x: 690, y: 315, width: 295, height: 270, rx: 12, class: 'zone' }, L.zones);
+  txt(L.zones, 705, 339, 'read model', 'ztitle', 'start');
+  CK = { sum: txt(L.nodes, 970, 44, '', 'zsub', 'end'), rev: txt(L.nodes, 970, 339, '', 'zsub', 'end') };
+  SUM = table(L.nodes, { x: 705, y: 66, w: 265, title: 'order_summary', cols: [['order', 0], ['status', 70], ['items', 140], ['total', 195]], cellClass: (c, j) => j === 1 ? 'st-ok' : '' });
+  REV = table(L.nodes, { x: 705, y: 361, w: 265, title: 'revenue_by_sku', cols: [['sku', 0], ['units', 110], ['revenue', 170]] });
+  P.sum = path(L.edges, 'M657 150 H688');
+  P.rev = path(L.edges, 'M657 440 H688');
+}
+function showState(s, from) {
+  const items = Object.entries(s.items).map(([k, i]) => `${i.qty}× ${k}`).join(', ') || '—';
+  const lines = [['id', ORDER], ['status', s.status], ['items', items], ['discount', s.discount ? s.discount + '%' : '—'], ['total', total(s).toFixed(2)], ['version', `${s.version}${from ? '  (' + from + ')' : ''}`]];
+  lines.forEach(([k, v], i) => { ST[i].textContent = `${k.padEnd(9)} ${v}`; ST[i].setAttribute('class', 'lbl' + (k === 'version' ? ' accent' : '')); });
+}
+function facts() {
+  kv('#facts', [['stream version', String(EVENTS.length)], ['snapshots', SNAPS.length ? `at v${SNAPS[SNAPS.length - 1].v}` : 'none'],
+    ['events read', String(STATS.read)], ['appends rejected', String(STATS.conflicts)], ['commands rejected', String(STATS.rejected)],
+    ['order_summary', `checkpoint v${PROJ.sum}`], ['revenue_by_sku', `checkpoint v${PROJ.rev}${PROJ.buggy ? ' (buggy)' : ''}`]]);
+  CK.sum.textContent = `checkpoint v${PROJ.sum}`;
+  CK.rev.textContent = `checkpoint v${PROJ.rev}`;
+}
+
+/* ---------- store operations ---------- */
+function appendRow(e, flash = true) {
+  EVENTS.push(e);
+  const r = EV.add([String(e.v), e.type, dataStr(e)]);
+  if (!flash) r.flash = false;
+  $('#body').textContent = JSON.stringify({ stream: ORDER, version: e.v, type: e.type, data: e.data, metadata: { correlationId: e.corr || 'seed', timestamp: new Date().toISOString() } }, null, 2);
+}
+async function load(g, who = '') {
+  const snap = SNAPS[SNAPS.length - 1];
+  const from = snap ? snap.v : 0;
+  const n = EVENTS.length - from;
+  N.agg.set(`loading${who}`, 'busy');
+  await send(g, snap ? `snapshot v${from} + ${n}` : `read v1..v${EVENTS.length}`, 'sql', P.load);
+  let s = snap ? JSON.parse(JSON.stringify(snap.state)) : empty();
+  const step = Math.max(10, 220 / Math.max(1, n));
+  for (let i = from; i < EVENTS.length; i++) {
+    s = apply(s, EVENTS[i]);
+    EV.rows[i] && (EV.rows[i].flash = true);
+    STATS.read++;
+    if (EVENTS.length - from <= 12 || i === EVENTS.length - 1) { EV.draw(); showState(s, snap ? `snapshot v${from} + ${i - from + 1}` : `replayed ${i + 1}`); await sleep(g, step); }
+  }
+  if (!n) showState(s, `snapshot v${from} + 0`);
+  log('sql', 'load', snap
+    ? `Loaded snapshot <b>v${from}</b> and replayed ${n} event${n === 1 ? '' : 's'} after it: ${n} reads instead of ${EVENTS.length}.`
+    : `Replayed ${EVENTS.length} event${EVENTS.length === 1 ? '' : 's'} from v1 to rebuild the order${who}.`);
+  facts();
+  return s;
+}
+/* returns 'ok' | 'rejected' | 'conflict' */
+async function handle(g, cmd, { state = null, who = '', label = null } = {}) {
+  N.client.set(cmd.name, 'busy');
+  log('cmd', cmd.name, `${who ? who + ' sends' : 'Client sends'} <code>${cmd.name}(${Object.values(cmd.args || {}).join(', ')})</code>.`);
+  if (!state) { await send(g, label || cmd.name, 'cmd', P.cmd); state = await load(g, who ? ' for ' + who : ''); }
+  N.agg.set('deciding…', 'busy');
+  await sleep(g, 250);
+  const out = decide(state, cmd);
+  if (typeof out === 'string') {
+    STATS.rejected++;
+    N.agg.set('rejected', 'bad');
+    log('bad', 'rejected', `Aggregate rejects <code>${cmd.name}</code>: ${out}. No event is written, so nothing changes anywhere.`);
+    facts();
+    return 'rejected';
+  }
+  const expected = state.version;
+  const tok = token('append @' + expected, 'evt');
+  await travel(g, tok, P.append);
+  tok.remove();
+  if (EVENTS.length !== expected) {
+    STATS.conflicts++;
+    N.agg.set('WrongExpectedVersion', 'bad');
+    log('bad', 'conflict', `Append with <code>expectedVersion=${expected}</code> fails: the stream is already at v${EVENTS.length}. Someone else wrote first. Nothing was written.`);
+    await send(g, 'WrongExpectedVersion', 'fail', P.load);
+    facts();
+    return 'conflict';
+  }
+  for (const e of out) { e.v = EVENTS.length + 1; e.corr = cmd.name; appendRow(e); }
+  log('evt', 'append', `Appended <code>${out.map(e => e.type).join(', ')}</code> as v${EVENTS.length} with <code>expectedVersion=${expected}</code>.`);
+  N.agg.set(`ok · v${EVENTS.length}`, 'ok');
+  facts();
+  await project(g);
+  return 'ok';
+}
+
+/* ---------- projections ---------- */
+function projectSum(e) {
+  const s = EVENTS.slice(0, e.v).reduce(apply, empty());
+  const items = Object.values(s.items).reduce((a, i) => a + i.qty, 0);
+  const cells = [ORDER, s.status, String(items), total(s).toFixed(2)];
+  if (!SUM.rows.length) SUM.add(cells); else SUM.set(SUM.rows[0], { cells });
+  PROJ.sum = e.v;
+}
+function projectRev(e) {
+  if (e.type === 'PaymentConfirmed') {
+    const s = EVENTS.slice(0, e.v).reduce(apply, empty());
+    const factor = PROJ.buggy ? 1 : 1 - s.discount / 100;
+    for (const [sku, i] of Object.entries(s.items)) {
+      const amt = +(i.qty * i.price * factor).toFixed(2);
+      const row = REV.rows.find(r => r.cells[0] === sku);
+      if (row) REV.set(row, { cells: [sku, String(+row.cells[1] + i.qty), (+row.cells[2] + amt).toFixed(2)] });
+      else REV.add([sku, String(i.qty), amt.toFixed(2)]);
+    }
+  }
+  PROJ.rev = e.v;
+}
+async function project(g) {
+  const todo = EVENTS.filter(e => e.v > PROJ.sum);
+  if (!todo.length) return;
+  await Promise.all([send(g, todo[todo.length - 1].type, 'evt', P.sum), send(g, todo[todo.length - 1].type, 'evt', P.rev)]);
+  for (const e of todo) { projectSum(e); projectRev(e); }
+  log('route', 'project', `Both projections apply v${todo[0].v}${todo.length > 1 ? '..v' + todo[todo.length - 1].v : ''} and move their checkpoints.`);
+  facts();
+}
+
+/* ---------- scenarios ---------- */
+const KB = { sku: 'SKU-KB-0721', qty: 2, price: 64.5 };
+const MS = { sku: 'SKU-MS-0003', qty: 1, price: 30.0 };
+async function lifecycle(g, { withRejection = false } = {}) {
+  for (const cmd of [
+    { name: 'PlaceOrder', args: {} },
+    { name: 'AddItem', args: KB },
+    { name: 'AddItem', args: MS },
+    ...(withRejection ? [{ name: 'Ship', args: {} }] : []),
+    { name: 'ConfirmPayment', args: { amount: 159.0 } },
+    { name: 'Ship', args: {} },
+  ]) { await handle(g, cmd); await checkpoint(g); }
+}
+async function concurrency(g) {
+  await handle(g, { name: 'PlaceOrder', args: {} }); await checkpoint(g);
+  await handle(g, { name: 'AddItem', args: KB }); await checkpoint(g);
+  await handle(g, { name: 'AddItem', args: MS }); await checkpoint(g);
+  log('info', 'race', 'Two requests arrive at the same moment: support applies a 10% discount, and the payment page confirms 159.00. Both handlers load the stream at v3.');
+  N.client.set('A: ApplyDiscount · B: ConfirmPayment', 'busy');
+  await Promise.all([send(g, 'A: ApplyDiscount', 'cmd', P.cmd), sleep(g, 250).then(() => send(g, 'B: ConfirmPayment', 'cmd', P.cmd))]);
+  const sa = await load(g, ' for A');
+  const sb = EVENTS.reduce(apply, empty());
+  log('sql', 'load', 'Handler B loads the same v3 state in parallel.');
+  await checkpoint(g);
+  await handle(g, { name: 'ApplyDiscount', args: { pct: 10 } }, { state: sa, who: 'Support (A)' });
+  await checkpoint(g);
+  let r = await handle(g, { name: 'ConfirmPayment', args: { amount: 159.0 } }, { state: sb, who: 'Payment page (B)' });
+  await checkpoint(g);
+  if (r === 'conflict') {
+    log('info', 'retry', 'Handler B reloads the stream and re-runs the decision against the new state.');
+    r = await handle(g, { name: 'ConfirmPayment', args: { amount: 159.0 } }, { who: 'Payment page (B, retry)', label: 'B: retry' });
+    await checkpoint(g);
+    if (r === 'rejected') {
+      log('info', 'client', 'The payment page shows the new total and the customer pays 143.10.');
+      await handle(g, { name: 'ConfirmPayment', args: { amount: 143.1 } }, { who: 'Payment page (B)' });
+      await checkpoint(g);
+    }
+  }
+  await handle(g, { name: 'Ship', args: {} });
+}
+async function snapshot(g) {
+  log('info', 'seed', 'This order has been edited a lot: 30 events of items added and removed are already in the stream.');
+  appendRow({ v: 1, type: 'OrderPlaced', data: { customer: 'u-88' } }, false);
+  const skus = [KB, MS, { sku: 'SKU-HD-0112', qty: 1, price: 89.0 }];
+  for (let i = 2; i <= 30; i++) {
+    const it = skus[i % 3];
+    appendRow(i % 2 ? { v: i, type: 'ItemRemoved', data: { sku: it.sku, qty: 1 } } : { v: i, type: 'ItemAdded', data: { ...it, qty: 1 } }, false);
+  }
+  EVENTS.forEach(e => { projectSum(e); projectRev(e); });
+  EV.draw(); facts();
+  await checkpoint(g);
+  await handle(g, { name: 'AddItem', args: { ...KB, qty: 1 } });
+  await checkpoint(g);
+  const s = EVENTS.reduce(apply, empty());
+  await send(g, 'snapshot v' + s.version, 'sql', P.append);
+  SNAPS.push({ v: s.version, state: s });
+  SNAP.add([String(s.version), `${s.status} · ${Object.keys(s.items).length} skus · ${total(s).toFixed(2)}`]);
+  log('sql', 'snapshot', `A background job saves a snapshot of the state at <b>v${s.version}</b>. It's a cache: delete it and loading still works, just slower.`);
+  facts();
+  await checkpoint(g);
+  const before = STATS.read;
+  const amount = total(s);
+  await handle(g, { name: 'ConfirmPayment', args: { amount } });
+  log('info', 'cost', `That load read ${STATS.read - before} event${STATS.read - before === 1 ? '' : 's'} instead of ${EVENTS.length - 1}.`);
+  await checkpoint(g);
+  await handle(g, { name: 'Ship', args: {} });
+}
+async function rebuild(g) {
+  PROJ.buggy = true;
+  log('info', 'seed', 'The order already went through its whole life, and both projections are caught up. But <code>revenue_by_sku</code> has a bug: it ignores <code>DiscountApplied</code>.');
+  const seed = [
+    { type: 'OrderPlaced', data: { customer: 'u-88' } }, { type: 'ItemAdded', data: KB }, { type: 'ItemAdded', data: MS },
+    { type: 'DiscountApplied', data: { pct: 10 } }, { type: 'PaymentConfirmed', data: { amount: 143.1 } }, { type: 'OrderShipped', data: { carrier: 'DHL' } },
+  ];
+  seed.forEach((e, i) => { appendRow({ ...e, v: i + 1 }, false); });
+  EVENTS.forEach(e => { projectSum(e); projectRev(e); });
+  EV.draw(); facts();
+  N.agg.set('idle');
+  await sleep(g, 600);
+  await checkpoint(g);
+  const wrong = REV.rows.reduce((a, r) => a + +r.cells[2], 0);
+  log('bad', 'mismatch', `Finance notices <code>revenue_by_sku</code> sums to <b>${wrong.toFixed(2)}</b> but the order was paid <b>143.10</b>.`);
+  REV.rows.forEach(r => REV.set(r, { state: 'bad' }));
+  await sleep(g, 800);
+  await checkpoint(g);
+  log('info', 'deploy', 'The fix is deployed. Because events are the source of truth, the read model can simply be thrown away and rebuilt: <code>TRUNCATE revenue_by_sku</code>, checkpoint ← 0.');
+  REV.clear(); PROJ.rev = 0; PROJ.buggy = false; facts();
+  await sleep(g, 600);
+  await checkpoint(g);
+  for (const e of EVENTS) {
+    await send(g, `v${e.v} ${e.type}`, 'evt', P.rev);
+    projectRev(e);
+    facts();
+  }
+  log('ok', 'replayed', `Replayed v1..v${EVENTS.length} into the fixed projection. Revenue now sums to ${REV.rows.reduce((a, r) => a + +r.cells[2], 0).toFixed(2)}. The event store and <code>order_summary</code> were never touched.`);
+}
+
+async function run(g) {
+  N.agg.set('idle');
+  if (S.scenario === 'lifecycle') await lifecycle(g);
+  if (S.scenario === 'rejected') await lifecycle(g, { withRejection: true });
+  if (S.scenario === 'concurrency') await concurrency(g);
+  if (S.scenario === 'snapshot') await snapshot(g);
+  if (S.scenario === 'rebuild') await rebuild(g);
+}
+
+const NOTES = {
+  lifecycle: 'Five commands, five events. The aggregate never stored a row; each command rebuilt the order from the stream, and the two read models were derived from the same events.',
+  rejected: '<code>Ship</code> was checked against the replayed state and refused before anything was written. Invalid commands leave no trace in the store, only valid facts get in.',
+  concurrency: 'Both handlers decided from v3, but only one append could win. The loser got <code>WrongExpectedVersion</code>, reloaded, and found the total had changed, so its stale payment was rejected instead of silently overwriting the discount.',
+  snapshot: 'Loading a 31-event stream replays every event. After the snapshot, the next command read the snapshot plus only the events after it.',
+  rebuild: 'A bug in a read model is cheap to fix with event sourcing: drop it, reset the checkpoint, replay. The history needed to compute the right answer was there all along.',
+};
+function finish() {
+  verdict(S.scenario === 'concurrency' ? `CONSISTENT · ${STATS.conflicts} CONFLICT` : 'CONSISTENT', 'ok');
+  N.client.set('done', 'ok');
+  note(NOTES[S.scenario]);
+  log('ok', 'done', NOTES[S.scenario]);
+}
+function reset() {
+  EVENTS = []; SNAPS = []; PROJ = { sum: 0, rev: 0, buggy: false }; STATS = { read: 0, conflicts: 0, rejected: 0 };
+  build();
+  showState(empty());
+  facts();
+  $('#body').textContent = '—';
+  log('route', 'setup', `Empty stream <code>${ORDER}</code>. Projections subscribe to the store from checkpoint v0.`);
+}
+
+Sim.bindSelect('#scenario', v => { S.scenario = v; });
+Sim.init({ reset, run, finish });
+})();
+</script>

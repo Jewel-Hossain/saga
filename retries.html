@@ -1,0 +1,360 @@
+<title>Retries and TTL Simulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="assets/sim.css">
+
+<div class="app">
+  <header class="top">
+    <div>
+      <h1>Retries, delays and <span>TTL</span></h1>
+      <p>What a RabbitMQ consumer should do when processing fails. Retrying in place blocks the queue, so failed messages are parked in delay queues whose TTL dead-letters them back when it's time to try again. Messages that can never succeed, or have expired, go to a parking-lot queue.</p>
+    </div>
+    <nav class="pages" aria-label="Simulations"><a href="index.html">← All simulators</a></nav>
+  </header>
+
+  <section class="controls" aria-label="Simulation controls">
+    <label class="field" for="scenario"><span>Scenario</span>
+      <select id="scenario">
+        <option value="transient" selected>Gateway returns 503 twice, then recovers</option>
+        <option value="exhausted">Gateway stays down: retries exhausted</option>
+        <option value="requeue">Anti-pattern: nack with requeue=true</option>
+        <option value="poison">Non-retryable error (bad payload)</option>
+        <option value="ttl">Message TTL expires while consumer is offline</option>
+      </select>
+    </label>
+    <div class="field"><span>Playback</span>
+      <div class="transport">
+        <button id="play" class="btn primary" type="button">Run</button>
+        <button id="step" class="btn" type="button" title="Run until the next delivery settles">Step</button>
+        <button id="reset" class="btn" type="button">Reset</button>
+      </div>
+    </div>
+    <div class="field"><span>Speed</span>
+      <div class="speed"><input id="speed" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Animation speed"><output id="speedOut">1×</output></div>
+    </div>
+  </section>
+
+  <main class="grid">
+    <section class="card stage">
+      <div class="stage-head">
+        <div>
+          <h2>Retry topology</h2>
+          <p>Delay queues have no consumers. Each one is declared with <code>x-message-ttl</code> and <code>x-dead-letter-exchange=orders</code>, so a message sits there for its delay and then flows back into <code>orders.q</code>. Time in delay queues is compressed.</p>
+        </div>
+        <div class="legend" aria-label="Token colours">
+          <span style="background:var(--k-cmd)">message</span>
+          <span style="background:var(--k-warn)">delayed retry</span>
+          <span style="background:var(--k-reply)">success</span>
+          <span style="background:var(--k-fail)">failure</span>
+          <span style="background:var(--k-dead)">parked / expired</span>
+        </div>
+      </div>
+      <div class="svgwrap"><svg id="topo" viewBox="0 0 1000 590" style="--ar:0.59" role="img" aria-label="Producer, orders exchange and queue, consumer calling a gateway, a retry exchange with three delay queues, and a dead letter exchange with a parking-lot queue"></svg></div>
+    </section>
+
+    <aside class="side">
+      <section class="card">
+        <div class="check-head"><h2>Outcome</h2><span id="verdict" class="pill">NOT STARTED</span></div>
+        <p class="derived">Goal: failures are retried later without blocking other messages, and nothing retries forever.</p>
+        <dl id="facts" class="kv"></dl>
+        <p id="note"></p>
+      </section>
+      <section class="card">
+        <h2>Last message</h2>
+        <dl id="props" class="kv"><dt>—</dt><dd>Nothing published yet</dd></dl>
+      </section>
+    </aside>
+
+    <section class="card log">
+      <div class="log-head"><h2>Broker trace</h2><span>AMQP methods and consumer decisions</span></div>
+      <ol id="log"></ol>
+    </section>
+  </main>
+
+  <section class="glossary">
+    <h2>Terms used here</h2>
+    <dl>
+      <div><dt>Delay queue (TTL + DLX)</dt><dd>A queue with no consumers, <code>x-message-ttl</code> and a dead-letter exchange. Messages wait out the TTL, then RabbitMQ republishes them to the DLX. That's how a delay is built from standard features.</dd></div>
+      <div><dt>Retry tiers · backoff</dt><dd>Several delay queues (5 s, 30 s, 2 min). The consumer picks the next tier from an <code>x-retry-count</code> header, so each retry waits longer.</dd></div>
+      <div><dt>Parking lot (DLQ)</dt><dd>Where messages go when retrying is pointless: retries exhausted, payload invalid, or expired. Nothing consumes it automatically; people inspect and replay.</dd></div>
+      <div><dt>requeue=true</dt><dd>Puts the message straight back at the head of the queue. With a persistent failure it's redelivered immediately, forever, burning CPU and blocking everything behind it.</dd></div>
+      <div><dt>Retryable vs non-retryable</dt><dd>Timeouts and 503s may succeed later. Validation errors and 4xx won't, so they should go to the parking lot on the first attempt.</dd></div>
+      <div><dt>Message TTL · expiration</dt><dd>The <code>expiration</code> property (or a queue-wide <code>x-message-ttl</code>) drops or dead-letters messages that waited too long. Good for data that goes stale, like price updates.</dd></div>
+      <div><dt>x-death</dt><dd>A header RabbitMQ adds on every dead-lettering, with the reason (<code>rejected</code>, <code>expired</code>, <code>maxlen</code>), the queue and a count.</dd></div>
+    </dl>
+  </section>
+</div>
+
+<script src="assets/sim.js"></script>
+<script>
+(() => {
+const { $, txt, el, sleep, checkpoint, stage, path, node, exchange, queue, token, travel, send, log, verdict, note, kv, hex } = Sim;
+let S = { scenario: 'transient' };
+let N, P, EX, Q, M, STAT;
+const TIERS = [
+  { q: 'r5', name: 'orders.retry.5s', ttl: 5, steps: [5, 4, 3, 2, 1] },
+  { q: 'r30', name: 'orders.retry.30s', ttl: 30, steps: [30, 25, 20, 15, 10, 5] },
+  { q: 'r2m', name: 'orders.retry.2m', ttl: 120, steps: [120, 100, 80, 60, 40, 20] },
+];
+const TY = { r5: 260, r30: 340, r2m: 420 };
+
+function build() {
+  const L = stage($('#topo'));
+  N = {}; P = {}; EX = {}; Q = {};
+  N.producer = node(L.nodes, { x: 90, y: 140, w: 140, h: 70, title: 'Producer', sub: 'checkout-svc' });
+  EX.orders = exchange(L.nodes, { x: 290, y: 140, name: 'orders', type: 'direct' });
+  Q.main = queue(L.nodes, { x: 520, y: 140, name: 'orders.q', cap: 8, keys: ['↳ order.created · DLX orders.dlx'] });
+  N.consumer = node(L.nodes, { x: 850, y: 140, w: 160, h: 80, title: 'Consumer', sub: 'payment-worker' });
+  N.gateway = node(L.nodes, { x: 850, y: 44, w: 170, h: 64, title: 'Payment gateway', sub: 'external API', status: '' });
+  EX.retry = exchange(L.nodes, { x: 700, y: 300, name: 'orders.retry', type: 'direct', labelSide: 'bottom' });
+  for (const t of TIERS) Q[t.q] = queue(L.nodes, { x: 470, y: TY[t.q], name: t.name, cap: 6, keys: [`x-message-ttl ${t.ttl * 1000} · DLX orders`], dash: true });
+  EX.dlx = exchange(L.nodes, { x: 700, y: 520, name: 'orders.dlx', type: 'fanout', labelSide: 'bottom' });
+  Q.dlq = queue(L.nodes, { x: 470, y: 520, name: 'orders.dlq (parking lot)', cap: 6, dash: true });
+
+  P.pub = path(L.edges, 'M160 140 H260');
+  P.bind = path(L.edges, `M318 140 H${520 - Q.main.w / 2 - 2}`);
+  P.consume = path(L.edges, `M${520 + Q.main.w / 2} 140 H768`);
+  P.call = path(L.edges, 'M850 100 V78');
+  P.toRetry = path(L.edges, 'M820 180 V300 H730');
+  for (const t of TIERS) {
+    const y = TY[t.q], qr = 470 + Q[t.q].w / 2, ql = 470 - Q[t.q].w / 2;
+    P['b' + t.q] = path(L.edges, `M672 300 C 610 300, 600 ${y}, ${qr + 2} ${y}`);
+    P['x' + t.q] = path(L.edges, `M${ql - 2} ${y} H290 V170`, 'dash');
+  }
+  P.toDlx = path(L.edges, 'M890 180 V520 H730');
+  P.expire = path(L.edges, `M560 123 V88 H965 V492 H700 V494`, 'dash', false);
+  P.dlq = path(L.edges, `M672 520 H${470 + Q.dlq.w / 2 + 2}`);
+  txt(L.edges, 298, 205, 'expired → back to orders', 'tiny', 'start');
+}
+function facts() {
+  kv('#facts', [['delivery attempts', String(STAT.attempts)], ['processed OK', String(STAT.ok)], ['delayed retries', String(STAT.retries)],
+    ['parked in DLQ', String(Q.dlq.items.length)], ['messages in orders.q', String(Q.main.items.length)], ['consumer CPU', STAT.cpu]]);
+}
+function inspect(m) {
+  const rows = [['message_id', m.id], ['routing_key', 'order.created'], ['delivery_mode', '2 (persistent)']];
+  if (m.expiration) rows.push(['expiration', m.expiration]);
+  rows.push(['x-retry-count', String(m.retry)]);
+  if (m.death) rows.push(['x-death', JSON.stringify(m.death)]);
+  if (m.redelivered) rows.push(['redelivered', 'true']);
+  kv('#props', rows);
+}
+
+/* ---------- moves ---------- */
+async function publish(g, m) {
+  N.producer.set('publish', 'busy');
+  inspect(m);
+  log('cmd', 'basic.publish', `checkout-svc publishes <code>${m.id}</code>${m.expiration ? ` with <code>expiration=${m.expiration}</code>` : ''}.`);
+  const t = token(m.label, 'cmd');
+  await travel(g, t, P.pub);
+  EX.orders.hit();
+  await travel(g, t, P.bind);
+  t.remove();
+  m.item = Q.main.push({ label: m.short, kind: 'cmd' });
+  N.producer.set('idle');
+  facts();
+}
+async function deliver(g, m) {
+  m.item.unacked = true; Q.main.draw();
+  STAT.attempts++;
+  log('deliver', 'basic.deliver', `<code>${m.id}</code> → payment-worker${m.redelivered ? ' · redelivered=true' : ''}${m.retry ? ` · x-retry-count=${m.retry}` : ''}.`);
+  await send(g, m.label, m.retry ? 'warn' : 'cmd', P.consume);
+  N.consumer.set('processing…', 'busy');
+  facts();
+}
+async function callGateway(g, ok, label = 'POST /charge') {
+  await send(g, label, 'cmd', P.call);
+  N.gateway.set(ok ? '200 OK' : '503 Unavailable', ok ? 'ok' : 'bad');
+  await sleep(g, 250);
+  await send(g, ok ? '200' : '503', ok ? 'reply' : 'fail', P.call, true);
+}
+function ack(m, verb = 'basic.ack', html) {
+  Q.main.remove(m.item);
+  log('ok', verb, html || `payment-worker acks <code>${m.id}</code>; it leaves <code>orders.q</code>.`);
+  facts();
+}
+async function delay(g, m, tier) {
+  m.retry++;
+  inspect(m);
+  N.consumer.set(`retry #${m.retry} in ${tier.name.split('.').pop()}`, 'warn');
+  log('warn', 'retry', `Transient failure. The consumer publishes a copy to <code>orders.retry</code> with <code>x-retry-count=${m.retry}</code> and routing key <code>${tier.name.split('.').pop()}</code>, then acks the original so <code>orders.q</code> keeps moving.`);
+  const t = token(m.label, 'warn');
+  await travel(g, t, P.toRetry);
+  EX.retry.hit();
+  ack(m, 'basic.ack', `Original acked; the next message in <code>orders.q</code> can be delivered.`);
+  await travel(g, t, P['b' + tier.q]);
+  t.remove();
+  const it = Q[tier.q].push({ label: m.short, kind: 'warn' });
+  STAT.retries++; facts();
+  N.consumer.set('idle');
+  for (const s of tier.steps) { Q[tier.q].extra = ` · TTL ${s >= 60 ? s / 60 + 'm' : s + 's'}`; Q[tier.q].draw(); await sleep(g, 220); }
+  Q[tier.q].extra = ''; Q[tier.q].remove(it);
+  m.death = [{ reason: 'expired', queue: tier.name, count: 1 }];
+  inspect(m);
+  log('dead', 'expired', `TTL elapsed in <code>${tier.name}</code>. RabbitMQ dead-letters the message to <code>orders</code> with <code>x-death reason=expired</code>.`);
+  const t2 = token(m.label, 'warn');
+  await travel(g, t2, P['x' + tier.q]);
+  EX.orders.hit();
+  await travel(g, t2, P.bind);
+  t2.remove();
+  m.item = Q.main.push({ label: m.short, kind: 'warn' });
+  facts();
+}
+async function park(g, m, reason) {
+  N.consumer.set('parking message', 'bad');
+  log('dead', 'park', reason);
+  const t = token(m.label, 'dead');
+  await travel(g, t, P.toDlx);
+  EX.dlx.hit();
+  ack(m, 'basic.ack', 'Original acked after it was safely published to <code>orders.dlx</code>.');
+  await travel(g, t, P.dlq);
+  t.remove();
+  Q.dlq.push({ label: m.short, kind: 'dead' });
+  N.consumer.set('idle');
+  facts();
+}
+const newMsg = (n, extra = {}) => ({ id: 'ord-' + n, short: String(n).slice(-2), label: 'ord-' + n, retry: 0, ...extra });
+
+/* ---------- scenarios ---------- */
+async function transient(g, failures) {
+  const m = newMsg(1042);
+  await publish(g, m);
+  await checkpoint(g);
+  for (let attempt = 0; ; attempt++) {
+    await deliver(g, m);
+    const ok = attempt >= failures;
+    await callGateway(g, ok);
+    if (ok) {
+      ack(m);
+      STAT.ok++;
+      N.consumer.set('charged', 'ok');
+      return 'ok';
+    }
+    log('bad', '503', `Gateway answers <code>503 Service Unavailable</code> (attempt ${attempt + 1}).`);
+    await checkpoint(g);
+    if (m.retry >= TIERS.length) {
+      m.death = [{ reason: 'rejected', queue: 'orders.q', count: 1 }];
+      inspect(m);
+      await park(g, m, `<code>x-retry-count=${m.retry}</code> has reached the limit of ${TIERS.length} retries. The consumer stops retrying and sends the message to the parking lot.`);
+      return 'parked';
+    }
+    await delay(g, m, TIERS[m.retry]);
+    await checkpoint(g);
+  }
+}
+async function requeue(g) {
+  const m = newMsg(1042);
+  await publish(g, m);
+  for (const n of [1043, 1044, 1045]) { const o = newMsg(n); o.item = Q.main.push({ label: o.short, kind: 'cmd' }); }
+  log('route', 'backlog', 'Three more orders are queued behind it.');
+  facts();
+  await checkpoint(g);
+  for (let i = 0; i < 6; i++) {
+    m.redelivered = i > 0;
+    inspect(m);
+    await deliver(g, m);
+    await callGateway(g, false);
+    STAT.cpu = `${Math.min(100, 30 + i * 15)}%`;
+    log('bad', 'basic.nack', `payment-worker nacks <code>${m.id}</code> with <code>requeue=true</code>. RabbitMQ puts it straight back at the head of the queue.`);
+    await send(g, m.label, 'fail', P.consume, true);
+    m.item.unacked = false; Q.main.draw();
+    facts();
+    if (i === 2) log('warn', 'hot loop', 'No delay between attempts: the gateway is hammered, the consumer spins, and ord-1043..1045 never get a turn.');
+    await checkpoint(g);
+  }
+  N.consumer.set('stuck in hot loop', 'bad');
+  log('bad', 'forever', 'Nothing in this setup will ever stop the loop. It continues until someone deploys a fix or purges the queue.');
+}
+async function poison(g) {
+  const m = newMsg(1042);
+  await publish(g, m);
+  await checkpoint(g);
+  await deliver(g, m);
+  await sleep(g, 400);
+  log('bad', 'validation', '<code>amount</code> is <code>"129,00"</code>: the payload fails schema validation. Retrying will produce the same error every time.');
+  N.consumer.set('invalid payload', 'bad');
+  m.death = [{ reason: 'rejected', queue: 'orders.q', count: 1 }];
+  inspect(m);
+  await checkpoint(g);
+  await park(g, m, 'The error is classified as <b>non-retryable</b>, so the message goes to the parking lot on the first attempt instead of wasting three retries.');
+  const next = newMsg(1043);
+  await publish(g, next);
+  await deliver(g, next);
+  await callGateway(g, true);
+  ack(next);
+  STAT.ok++;
+  N.consumer.set('charged ord-1043', 'ok');
+}
+async function ttl(g) {
+  N.consumer.set('offline (deploy)', 'crash');
+  N.consumer.base = 'off'; N.consumer.set('offline (deploy)', 'crash');
+  log('warn', 'offline', 'payment-worker is down for a deployment. Price updates keep arriving with <code>expiration=10000</code>: a price older than 10 s is useless.');
+  const v1 = newMsg(1, { id: 'price-v1', label: 'price v1', short: 'v1', expiration: '10000' });
+  await publish(g, v1);
+  let age = 0;
+  const tick = async n => { for (let i = 0; i < n; i++) { age++; Q.main.extra = ` · price v1 age ${age}s`; Q.main.draw(); await sleep(g, 200); } };
+  await tick(6);
+  await checkpoint(g);
+  const v2 = newMsg(2, { id: 'price-v2', label: 'price v2', short: 'v2', expiration: '10000' });
+  await publish(g, v2);
+  await tick(4);
+  Q.main.extra = '';
+  v1.death = [{ reason: 'expired', queue: 'orders.q', count: 1 }];
+  inspect(v1);
+  Q.main.remove(v1.item);
+  log('dead', 'expired', '<code>price-v1</code> reached its <code>expiration</code> at the head of the queue. <code>orders.q</code> has a DLX, so instead of being dropped it is dead-lettered with <code>x-death reason=expired</code>.');
+  const t = token('price v1', 'dead');
+  await travel(g, t, P.expire);
+  EX.dlx.hit();
+  await travel(g, t, P.dlq);
+  t.remove();
+  Q.dlq.push({ label: 'v1', kind: 'dead' });
+  facts();
+  await checkpoint(g);
+  N.consumer.base = '';
+  N.consumer.set('back online', 'busy');
+  log('info', 'online', 'payment-worker comes back. Only the fresh price is still waiting.');
+  inspect(v2);
+  await deliver(g, v2);
+  await sleep(g, 400);
+  ack(v2);
+  STAT.ok++;
+  N.consumer.set('applied price v2', 'ok');
+}
+
+async function run(g) {
+  if (S.scenario === 'transient') S.result = await transient(g, 2);
+  if (S.scenario === 'exhausted') S.result = await transient(g, 99);
+  if (S.scenario === 'requeue') await requeue(g);
+  if (S.scenario === 'poison') await poison(g);
+  if (S.scenario === 'ttl') await ttl(g);
+}
+const NOTES = {
+  transient: 'Two failures, two delayed retries (5 s, then 30 s), then success. While the message waited in delay queues, <code>orders.q</code> was free for other work.',
+  exhausted: 'After three delayed retries (5 s, 30 s, 2 min) the consumer gave up and parked the message. The gateway was never hammered, and nothing retries forever.',
+  requeue: '<b>Hot loop.</b> <code>requeue=true</code> has no delay and no limit: the same message bounced between queue and consumer while three healthy orders waited behind it.',
+  poison: 'A bad payload will fail the same way every time, so it went to the parking lot on the first attempt and the next order went through right away.',
+  ttl: 'The stale price expired before anyone could act on it and was dead-lettered for the record. The consumer only saw the price that still mattered.',
+};
+function finish() {
+  const v = S.scenario === 'requeue' ? ['HOT LOOP', 'bad'] : S.scenario === 'exhausted' ? ['PARKED AFTER 3 RETRIES', 'warn']
+    : S.scenario === 'poison' ? ['PARKED · QUEUE MOVING', 'ok'] : S.scenario === 'ttl' ? ['STALE MESSAGE EXPIRED', 'ok'] : ['PROCESSED AFTER 2 RETRIES', 'ok'];
+  verdict(...v);
+  facts();
+  note(NOTES[S.scenario]);
+  log(v[1] === 'bad' ? 'bad' : 'ok', 'result', NOTES[S.scenario]);
+}
+function reset() {
+  STAT = { attempts: 0, ok: 0, retries: 0, cpu: 'normal' };
+  M = null;
+  build();
+  facts();
+  kv('#props', [['—', 'Nothing published yet']]);
+  log('route', 'setup', 'Declared <code>orders</code> → <code>orders.q</code> (DLX <code>orders.dlx</code>), three delay queues bound to <code>orders.retry</code>, and the parking lot <code>orders.dlq</code>.');
+}
+
+Sim.bindSelect('#scenario', v => { S.scenario = v; });
+Sim.init({ reset, run, finish });
+})();
+</script>

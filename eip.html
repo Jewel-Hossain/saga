@@ -1,0 +1,344 @@
+<title>Integration Patterns Simulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="assets/sim.css">
+
+<div class="app">
+  <header class="top">
+    <div>
+      <h1>Integration <span>patterns</span></h1>
+      <p>Three classic enterprise integration patterns for shaping where messages go and what they carry: ask many and combine the answers (scatter-gather), let the message carry its own route (routing slip), and keep big payloads out of the broker (claim check).</p>
+    </div>
+    <nav class="pages" aria-label="Simulations"><a href="index.html">← All simulators</a></nav>
+  </header>
+
+  <section class="controls" aria-label="Simulation controls">
+    <label class="field" for="scenario"><span>Pattern · variant</span>
+      <select id="scenario">
+        <optgroup label="Scatter-gather">
+          <option value="sg-all">Scatter-gather · all suppliers reply in time</option>
+          <option value="sg-timeout" selected>Scatter-gather · one supplier is too slow</option>
+        </optgroup>
+        <optgroup label="Routing slip">
+          <option value="rs-standard">Routing slip · standard order</option>
+          <option value="rs-review">Routing slip · high-value order adds manual review</option>
+        </optgroup>
+        <optgroup label="Claim check">
+          <option value="cc-inline">Claim check · 8 MB invoice sent inline</option>
+          <option value="cc-claim">Claim check · store the file, send a reference</option>
+        </optgroup>
+      </select>
+    </label>
+    <div class="field"><span>Playback</span>
+      <div class="transport">
+        <button id="play" class="btn primary" type="button">Run</button>
+        <button id="step" class="btn" type="button" title="Run until the next message settles">Step</button>
+        <button id="reset" class="btn" type="button">Reset</button>
+      </div>
+    </div>
+    <div class="field"><span>Speed</span>
+      <div class="speed"><input id="speed" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Animation speed"><output id="speedOut">1×</output></div>
+    </div>
+  </section>
+
+  <main class="grid">
+    <section class="card stage">
+      <div class="stage-head">
+        <div>
+          <h2 id="stageTitle">Topology</h2>
+          <p id="stageDesc"></p>
+        </div>
+        <div class="legend" aria-label="Token colours">
+          <span style="background:var(--k-cmd)">request / message</span>
+          <span style="background:var(--k-reply)">reply</span>
+          <span style="background:var(--k-sql)">blob store</span>
+          <span style="background:var(--k-fail)">rejected / late</span>
+        </div>
+      </div>
+      <div class="svgwrap"><svg id="topo" viewBox="0 0 1000 560" style="--ar:0.56" role="img" aria-label="Integration pattern topology"></svg></div>
+    </section>
+
+    <aside class="side">
+      <section class="card">
+        <div class="check-head"><h2>Result</h2><span id="verdict" class="pill">NOT STARTED</span></div>
+        <dl id="facts" class="kv"></dl>
+        <p id="note"></p>
+      </section>
+      <section class="card">
+        <h2>Last message</h2>
+        <dl id="props" class="kv"><dt>—</dt><dd>Nothing sent yet</dd></dl>
+        <pre class="body" id="body">—</pre>
+      </section>
+    </aside>
+
+    <section class="card log">
+      <div class="log-head"><h2>Trace</h2><span>Messages, in order</span></div>
+      <ol id="log"></ol>
+    </section>
+  </main>
+
+  <section class="glossary">
+    <h2>Terms used here</h2>
+    <dl>
+      <div><dt>Scatter-gather</dt><dd>Broadcast one request to several recipients, then use an aggregator to collect the replies into one answer.</dd></div>
+      <div><dt>Aggregator · completion condition</dt><dd>Groups replies by correlation id and decides when the group is done: all replies in, a fixed timeout, or "first good enough". Late replies to a closed group are discarded.</dd></div>
+      <div><dt>Routing slip</dt><dd>The sender attaches the list of processing steps to the message. Each step does its work, removes itself from the list and forwards to the next address. Steps don't need to know about each other.</dd></div>
+      <div><dt>Routing slip vs process manager</dt><dd>A routing slip fixes the route when the message is created. If the route depends on results along the way, a process manager (or saga orchestrator) is the better fit.</dd></div>
+      <div><dt>Claim check</dt><dd>Store a large payload somewhere else (object storage, a database), send only a reference, and let the receiver fetch it. Brokers stay fast and messages stay under size limits.</dd></div>
+      <div><dt>Message size limits</dt><dd>Kafka rejects records over <code>message.max.bytes</code> (about 1 MB by default); RabbitMQ has <code>max_message_size</code>. Even below the limit, large messages hurt memory, replication and latency for everyone.</dd></div>
+    </dl>
+  </section>
+</div>
+
+<script src="assets/sim.js"></script>
+<script>
+(() => {
+const { $, txt, el, sleep, checkpoint, stage, path, node, exchange, queue, table, token, travel, send, log, verdict, note, kv, hex } = Sim;
+let S = { scenario: 'sg-timeout' };
+let N, P, Q, EX, T, R;
+
+const DESC = {
+  sg: ['Scatter-gather', 'The quote service broadcasts one request through a fanout exchange to three suppliers. Their replies go to an aggregator, which closes the group when all replies are in or after a 3 s timeout, whichever comes first.'],
+  rs: ['Routing slip', 'Order intake decides the full route once and writes it into a <code>routing-slip</code> header. Each step processes the order, removes itself from the slip, and forwards the message to the next step on the list.'],
+  cc: ['Claim check', 'Billing has to hand an 8 MB PDF invoice to the mailer. The broker accepts messages of at most 1 MB.'],
+};
+const fam = () => S.scenario.slice(0, 2);
+
+/* ---------- topologies ---------- */
+function build() {
+  const L = stage($('#topo'));
+  N = {}; P = {}; Q = {}; EX = {}; T = {};
+  const f = fam();
+  if (f === 'sg') {
+    N.req = node(L.nodes, { x: 100, y: 260, w: 160, h: 80, title: 'Quote service', sub: 'requester' });
+    EX.f = exchange(L.nodes, { x: 280, y: 260, name: 'quote.requests', type: 'fanout' });
+    P.req = path(L.edges, 'M180 260 H250');
+    ['A', 'B', 'C'].forEach((s, i) => {
+      const y = [100, 260, 420][i];
+      Q[s] = queue(L.nodes, { x: 470, y, name: `supplier-${s.toLowerCase()}.quotes`, cap: 4 });
+      N[s] = node(L.nodes, { x: 720, y, w: 160, h: 76, title: `Supplier ${s}`, sub: ['~0.8 s', '~0.6 s', S.scenario === 'sg-all' ? '~1.2 s' : '~6 s (overloaded)'][i] });
+      P['f' + s] = path(L.edges, `M308 260 C 360 260, 370 ${y}, ${470 - Q[s].w / 2 - 2} ${y}`);
+      P['q' + s] = path(L.edges, `M${470 + Q[s].w / 2} ${y} H638`);
+      P['r' + s] = path(L.edges, `M802 ${y} H${940 + i * 14} V535 H187`);
+    });
+    N.agg = node(L.nodes, { x: 100, y: 480, w: 170, h: 80, title: 'Aggregator', sub: 'by correlation_id' });
+    P.res = path(L.edges, 'M100 438 V302');
+    T.agg = table(L.nodes, { x: 205, y: 448, w: 190, title: 'aggregation store', cols: [['supplier', 0], ['price', 80], ['arrived', 140]], cellClass: (c, j) => j === 2 && c === 'late' ? 'st-bad' : '' });
+  } else if (f === 'rs') {
+    const pos = { intake: [100, 280], validate: [320, 120], enrich: [540, 120], fraud: [760, 120], review: [760, 440], ship: [540, 440] };
+    const sub = { intake: 'builds the slip', validate: 'schema + rules', enrich: 'adds customer tier', fraud: 'scores risk', review: 'human approval', ship: 'books carrier' };
+    for (const [k, [x, y]] of Object.entries(pos)) N[k] = node(L.nodes, { x, y, w: 160, h: 76, title: k === 'fraud' ? 'Fraud check' : k === 'review' ? 'Manual review' : k[0].toUpperCase() + k.slice(1), sub: sub[k] });
+    if (S.scenario === 'rs-standard') { N.review.base = 'off'; N.review.set('not on this slip'); }
+    P['intake>validate'] = path(L.edges, 'M180 260 C 220 200, 220 120, 238 120');
+    P['validate>enrich'] = path(L.edges, 'M400 120 H458');
+    P['enrich>fraud'] = path(L.edges, 'M620 120 H678');
+    P['fraud>ship'] = path(L.edges, 'M720 160 C 680 300, 600 360, 560 400');
+    P['fraud>review'] = path(L.edges, 'M800 160 V400');
+    P['review>ship'] = path(L.edges, 'M678 440 H622');
+    if (S.scenario === 'rs-standard') { P['fraud>review'].classList.add('off'); P['review>ship'].classList.add('off'); }
+    else P['fraud>ship'].classList.add('off');
+    T.slip = txt(L.nodes, 100, 540, '', 'lbl accent', 'start');
+    txt(L.nodes, 100, 380, 'each arrow is a queue named after the step', 'tiny', 'start');
+  } else {
+    N.prod = node(L.nodes, { x: 100, y: 200, w: 160, h: 80, title: 'Billing', sub: 'invoice-svc' });
+    EX.x = exchange(L.nodes, { x: 300, y: 200, name: 'invoices', type: 'direct' });
+    Q.q = queue(L.nodes, { x: 520, y: 200, name: 'mailer.invoices', cap: 6, keys: ['max message size 1 MB'] });
+    N.cons = node(L.nodes, { x: 830, y: 200, w: 170, h: 80, title: 'Mailer', sub: 'sends invoice email' });
+    N.blob = node(L.nodes, { x: 470, y: 440, w: 190, h: 84, title: 'Object storage', sub: 's3://invoices', status: '' });
+    P.pub = path(L.edges, 'M180 200 H270');
+    P.bind = path(L.edges, `M328 200 H${520 - Q.q.w / 2 - 2}`);
+    P.cons = path(L.edges, `M${520 + Q.q.w / 2} 200 H743`);
+    P.put = path(L.edges, 'M100 242 V440 H373');
+    P.get = path(L.edges, 'M830 242 V440 H567');
+    T.blob = table(L.nodes, { x: 380, y: 500, w: 200, title: 'objects', cols: [['key', 0], ['size', 150]], max: 2 });
+    if (S.scenario === 'cc-inline') { N.blob.base = 'off'; N.blob.set('not used'); P.put.classList.add('off'); P.get.classList.add('off'); }
+  }
+}
+function inspect(rows, body) { kv('#props', rows); $('#body').textContent = body ? JSON.stringify(body, null, 2) : '—'; }
+
+/* ---------- scatter-gather ---------- */
+async function scatterGather(g) {
+  const all = S.scenario === 'sg-all';
+  const rid = 'rq-' + hex(4);
+  const TIMEOUT = 3000;
+  const SUP = { A: { ms: 800, price: 412 }, B: { ms: 600, price: 398 }, C: { ms: all ? 1200 : 6000, price: 377 } };
+  inspect([['exchange', 'quote.requests (fanout)'], ['correlation_id', rid], ['reply_to', 'quote.replies'], ['expiration', '3000']], { sku: 'SKU-KB-0721', qty: 500, deliverBy: '2026-11-02' });
+  N.req.set('request quotes', 'busy');
+  log('cmd', 'scatter', `Quote service publishes one request <code>${rid}</code> for 500 × SKU-KB-0721 to the fanout exchange.`);
+  await send(g, 'quote?', 'cmd', P.req);
+  EX.f.hit();
+  N.agg.set('collecting · 3 s left', 'busy');
+  log('route', 'fanout', 'The fanout exchange copies it to all three supplier queues. The aggregator opens a group for this correlation id.');
+  R = { got: 0, closed: false, late: [] };
+  await Promise.all(['A', 'B', 'C'].map(async s => { await send(g, 'quote?', 'cmd', P['f' + s]); Q[s].push({ label: '?', kind: 'cmd' }); }));
+  await checkpoint(g);
+  const suppliers = Promise.all(['A', 'B', 'C'].map(async s => {
+    Q[s].items[0].unacked = true; Q[s].draw();
+    await send(g, 'quote?', 'cmd', P['q' + s]);
+    Q[s].remove(Q[s].items[0]);
+    N[s].set('pricing…', 'busy');
+    await sleep(g, Math.min(SUP[s].ms, 1500));
+    if (SUP[s].ms > TIMEOUT) { N[s].set('still pricing…', 'warn'); while (!R.closed) await sleep(g, 100); await sleep(g, 600); }
+    N[s].set(`quoted ${SUP[s].price}`, 'ok');
+    await send(g, `${s}: ${SUP[s].price}`, R.closed ? 'fail' : 'reply', P['r' + s]);
+    if (R.closed) {
+      R.late.push(s);
+      T.agg.add([`Supplier ${s}`, SUP[s].price.toFixed(2), 'late']);
+      log('bad', 'late', `Supplier ${s}'s quote of ${SUP[s].price} arrives after the group closed. The aggregator discards it, even though it's the cheapest.`);
+      N[s].set('reply discarded', 'bad');
+      return;
+    }
+    R.got++;
+    T.agg.add([`Supplier ${s}`, SUP[s].price.toFixed(2), `${(Sim.simT / 1000).toFixed(1)}s`]);
+    inspect([['correlation_id', rid], ['from', `supplier-${s.toLowerCase()}`]], { price: SUP[s].price, currency: 'EUR', validFor: '24h' });
+    log('ok', 'reply', `Supplier ${s} replies ${SUP[s].price} EUR with <code>correlation_id=${rid}</code> (${R.got}/3).`);
+  }));
+  const inTime = ['A', 'B', 'C'].filter(s => SUP[s].ms <= TIMEOUT).length;
+  while (R.got < inTime) { N.agg.set(`collecting · ${R.got}/3`, 'busy'); await sleep(g, 100); }
+  if (inTime < 3) { for (let k = 3; k > 0; k--) { N.agg.set(`waiting for C · ${k}`, 'warn'); await sleep(g, 300); } }
+  R.closed = true;
+  const rows = T.agg.rows.filter(r => r.cells[2] !== 'late');
+  const best = rows.reduce((a, r) => (!a || +r.cells[1] < +a.cells[1] ? r : a), null);
+  T.agg.set(best, { state: 'good' });
+  log(R.got === 3 ? 'ok' : 'warn', R.got === 3 ? 'complete' : 'timeout', R.got === 3
+    ? 'All three replies are in, so the group completes before the timeout.'
+    : `3 s timeout: the group closes with ${R.got} of 3 replies. Waiting longer would make every quote slow.`);
+  N.agg.set(`best: ${best.cells[0]} ${best.cells[1]}`, 'ok');
+  await send(g, `best ${best.cells[1]}`, 'reply', P.res);
+  N.req.set(`offer ${best.cells[1]} EUR`, 'ok');
+  R.best = best.cells;
+  await checkpoint(g);
+  await suppliers;
+}
+
+/* ---------- routing slip ---------- */
+async function routingSlip(g) {
+  const hv = S.scenario === 'rs-review';
+  const amount = hv ? 18400 : 129;
+  const slip = ['validate', 'enrich', 'fraud', ...(hv ? ['review'] : []), 'ship'];
+  const label = s => s === 'fraud' ? 'fraud-check' : s === 'review' ? 'manual-review' : s;
+  const show = (done) => {
+    T.slip.textContent = 'routing-slip: ' + slip.map((s, i) => (i < done ? '✓' : i === done ? '▶' : '') + label(s)).join(' → ');
+    inspect([['message_id', 'ord-1042'], ['routing-slip', JSON.stringify(slip.slice(done).map(label))], ['slip-history', JSON.stringify(slip.slice(0, done).map(label))]], { orderId: 'ord-1042', amount, currency: 'EUR', customer: 'u-88' });
+  };
+  N.intake.set('building slip', 'busy');
+  await sleep(g, 500);
+  log('cmd', 'intake', hv
+    ? `Order ord-1042 is worth <b>${amount.toLocaleString('en')} EUR</b>, above the 10,000 EUR threshold, so intake adds <code>manual-review</code> to the slip.`
+    : `Order ord-1042 is a normal ${amount} EUR order. Intake attaches the standard slip.`);
+  show(0);
+  N.intake.set('slip attached', 'ok');
+  await checkpoint(g);
+  let from = 'intake';
+  for (let i = 0; i < slip.length; i++) {
+    const step = slip[i];
+    await send(g, 'ord-1042', 'cmd', P[`${from}>${step}`]);
+    N[step].set('processing…', 'busy');
+    await sleep(g, step === 'review' ? 1400 : 600);
+    const what = { validate: 'Schema and business rules pass.', enrich: 'Adds <code>customerTier=gold</code> from the CRM.', fraud: hv ? 'Risk score 61: within limits because a human will look at it next.' : 'Risk score 12: fine.', review: 'An analyst approves the order in the back-office UI.', ship: 'Books a DHL pickup. The slip is now empty, so the message stops here.' }[step];
+    N[step].set('done', 'ok');
+    show(i + 1);
+    log('ok', label(step), `${what}${i < slip.length - 1 ? ` Pops itself from the slip and forwards to <code>${label(slip[i + 1])}</code>.` : ''}`);
+    from = step;
+    await checkpoint(g);
+  }
+  R = { steps: slip.length };
+}
+
+/* ---------- claim check ---------- */
+async function claimCheck(g) {
+  const inline = S.scenario === 'cc-inline';
+  N.prod.set('invoice ready', 'busy');
+  if (inline) {
+    inspect([['exchange', 'invoices'], ['routing_key', 'invoice.ready'], ['content_type', 'application/pdf'], ['body size', '8,388,608 bytes']], { invoiceId: 'inv-7781', pdf: '<8 MB of base64…>' });
+    log('cmd', 'publish', 'Billing puts the whole 8 MB PDF in the message body.');
+    const t = token('inv-7781 · 8 MB', 'cmd');
+    await travel(g, t, P.pub);
+    EX.x.hit();
+    t.setKind('fail'); t.setLabel('8 MB > 1 MB');
+    log('bad', 'rejected', 'The broker refuses the publish: the message exceeds <code>max_message_size</code> (1 MB). Raising the limit would let every 8 MB message sit in broker memory, be replicated to every node, and block smaller messages behind it.');
+    await travel(g, t, P.pub, true);
+    t.remove();
+    N.prod.set('publish failed', 'bad');
+    R = { ok: false };
+    return;
+  }
+  const key = 'invoices/2026/10/inv-7781.pdf';
+  N.prod.set('PUT object', 'busy');
+  await send(g, 'PUT 8 MB', 'sql', P.put);
+  T.blob.add([key.split('/').pop(), '8.0 MB']);
+  N.blob.set('stored', 'ok');
+  log('sql', 'PUT', `Billing uploads the PDF to object storage at <code>s3://${key}</code>.`);
+  await checkpoint(g);
+  const body = { invoiceId: 'inv-7781', claimCheck: `s3://${key}`, size: 8388608, sha256: '9f2c…e41a', expiresAt: '2026-11-11T00:00:00Z' };
+  inspect([['exchange', 'invoices'], ['routing_key', 'invoice.ready'], ['content_type', 'application/json'], ['body size', `${JSON.stringify(body).length} bytes`]], body);
+  log('cmd', 'publish', `Billing publishes a ${JSON.stringify(body).length}-byte message holding only the reference and a checksum.`);
+  const t = token('inv-7781 · claim', 'cmd');
+  await travel(g, t, P.pub);
+  EX.x.hit();
+  await travel(g, t, P.bind);
+  t.remove();
+  const it = Q.q.push({ label: 'cc', kind: 'cmd' });
+  N.prod.set('done', 'ok');
+  await checkpoint(g);
+  it.unacked = true; Q.q.draw();
+  await send(g, 'inv-7781 · claim', 'cmd', P.cons);
+  N.cons.set('GET object', 'busy');
+  await send(g, 'GET', 'sql', P.get, true);
+  await send(g, '8 MB', 'sql', P.get);
+  log('sql', 'GET', 'The mailer redeems the claim check: it downloads the PDF directly from object storage and verifies the sha256.');
+  await sleep(g, 500);
+  Q.q.remove(it);
+  N.cons.set('invoice emailed', 'ok');
+  log('ok', 'ack', 'Mailer sends the email with the PDF attached and acks the small message. A storage lifecycle rule deletes the object after 30 days.');
+  R = { ok: true, size: JSON.stringify(body).length };
+}
+
+async function run(g) {
+  if (fam() === 'sg') await scatterGather(g);
+  if (fam() === 'rs') await routingSlip(g);
+  if (fam() === 'cc') await claimCheck(g);
+}
+function finish() {
+  let v, html;
+  if (fam() === 'sg') {
+    const late = R.late.length;
+    v = late ? [`BEST OF 2 · ${R.best[1]}`, 'warn'] : [`BEST OF 3 · ${R.best[1]}`, 'ok'];
+    html = late
+      ? `The aggregator answered on time with ${R.best[0]} at ${R.best[1]}, but Supplier C's cheaper 377.00 arrived too late and was thrown away. The completion condition trades price for latency.`
+      : `All three suppliers replied within the 3 s window, so the aggregator compared every quote and picked ${R.best[0]} at ${R.best[1]}.`;
+    kv('#facts', [['request', 'one, fanned out to 3'], ['replies in time', `${R.got} / 3`], ['late replies', late ? R.late.join(', ') : 'none'], ['chosen', `${R.best[0]} · ${R.best[1]} EUR`]]);
+  } else if (fam() === 'rs') {
+    v = [`ROUTED THROUGH ${R.steps} STEPS`, 'ok'];
+    html = S.scenario === 'rs-review'
+      ? 'The extra step was decided once, at intake, and travelled with the message. Fraud check and ship didn\'t change at all; they just forwarded to whatever the slip said next.'
+      : 'Each step only knew to "do my work, pop myself, forward to the next name on the slip". Adding or reordering steps means changing the slip, not the steps.';
+    kv('#facts', [['steps on slip', String(R.steps)], ['decided by', 'order intake, once'], ['steps that knew the full route', 'none']]);
+  } else {
+    v = R.ok ? [`DELIVERED · ${R.size}-BYTE MESSAGE`, 'ok'] : ['PUBLISH REJECTED', 'bad'];
+    html = R.ok
+      ? 'The broker only carried a few hundred bytes. The 8 MB went straight from billing to storage to mailer, and the broker stayed fast for everyone else.'
+      : 'The 8 MB body was over the broker\'s limit. Raising the limit would make it work at the cost of memory, replication traffic and latency for every other message.';
+    kv('#facts', [['payload', '8 MB PDF'], ['message size', R.ok ? `${R.size} bytes` : '8 MB (rejected)'], ['broker limit', '1 MB']]);
+  }
+  verdict(...v);
+  note(html);
+  log(v[1] === 'bad' ? 'bad' : 'ok', 'result', html);
+}
+function reset() {
+  R = {};
+  build();
+  const [title, desc] = DESC[fam()];
+  $('#stageTitle').textContent = title;
+  $('#stageDesc').innerHTML = desc;
+  kv('#facts', []);
+  inspect([['—', 'Nothing sent yet']]);
+  log('route', 'setup', desc);
+}
+
+Sim.bindSelect('#scenario', v => { S.scenario = v; });
+Sim.init({ reset, run, finish });
+})();
+</script>

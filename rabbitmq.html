@@ -1,0 +1,907 @@
+<title>Saga Broker Simulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: control bar on top, broker topology stage beside saga state + message inspector, broker trace underneath */
+:root {
+  --bg: #EDF0EE; --panel: #FFFFFF; --panel-2: #F5F7F6; --ink: #18211D; --muted: #5B6862;
+  --line: #BFC8C3; --line-2: #DDE3E0; --accent: #D9530A;
+  --k-cmd: #2C5BCB; --k-evt: #D9600E; --k-reply: #0D8576; --k-comp: #A93274; --k-fail: #C42B2B; --k-dead: #6A7074;
+  --ok: #23824F; --bad: #C42B2B; --warn: #A86E12; --on-k: #FFFFFF;
+  --f-display: 'Archivo', 'Arial Narrow', system-ui, sans-serif;
+  --f-body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --f-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0F1311; --panel: #171D1A; --panel-2: #1C2420; --ink: #E4EBE7; --muted: #8F9D96;
+    --line: #3A4741; --line-2: #26302B; --accent: #FF7A33;
+    --k-cmd: #7E9CFF; --k-evt: #FF8A45; --k-reply: #3FC7B1; --k-comp: #E472B4; --k-fail: #FF6B6B; --k-dead: #9AA1A5;
+    --ok: #5CC48C; --bad: #FF6B6B; --warn: #E3B04F; --on-k: #0E1311; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0F1311; --panel: #171D1A; --panel-2: #1C2420; --ink: #E4EBE7; --muted: #8F9D96;
+  --line: #3A4741; --line-2: #26302B; --accent: #FF7A33;
+  --k-cmd: #7E9CFF; --k-evt: #FF8A45; --k-reply: #3FC7B1; --k-comp: #E472B4; --k-fail: #FF6B6B; --k-dead: #9AA1A5;
+  --ok: #5CC48C; --bad: #FF6B6B; --warn: #E3B04F; --on-k: #0E1311; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 14px; line-height: 1.5; }
+.app { max-width: none; margin: 0; padding: 20px clamp(16px, 2vw, 32px) 40px; display: flex; flex-direction: column; gap: 16px; }
+code, .mono { font-family: var(--f-mono); font-size: 0.92em; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 8px 24px; }
+h1 { font-family: var(--f-display); font-weight: 800; font-size: 28px; letter-spacing: -0.01em; margin: 0; line-height: 1.1; text-wrap: balance; }
+h1 span { color: var(--accent); }
+header.top p { margin: 4px 0 0; color: var(--muted); max-width: min(70ch, 100%); }
+@media (min-width: 1700px) { header.top p { max-width: 120ch; } }
+h2 { font-family: var(--f-display); font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; margin: 0; color: var(--muted); }
+.pages { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.pages a { padding: 5px 12px; color: var(--ink); text-decoration: none; font-weight: 500; background: var(--panel-2); }
+.pages a + a { border-left: 1px solid var(--line); }
+.pages a[aria-current="page"] { background: var(--ink); color: var(--bg); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: end; background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 12px 14px; }
+.field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.field > span { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
+select, button { font: inherit; color: var(--ink); }
+select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 0; max-width: 100%; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { background: var(--panel-2); border: 0; padding: 6px 12px; cursor: pointer; font-weight: 500; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.transport { display: flex; gap: 6px; }
+.btn { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px; cursor: pointer; font-weight: 500; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-k); min-width: 84px; }
+.btn:hover { filter: brightness(1.05); }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.speed { display: flex; align-items: center; gap: 8px; }
+.speed input { accent-color: var(--accent); width: 120px; }
+.speed output { font-family: var(--f-mono); font-variant-numeric: tabular-nums; min-width: 3ch; }
+
+.grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+@media (min-width: 1120px) { .grid { grid-template-columns: minmax(0, 1fr) 360px; } .grid .log { grid-column: 1 / -1; } }
+@media (min-width: 1700px) { .grid { grid-template-columns: minmax(0, 1fr) 440px; } #log { max-height: 480px; } }
+.card { background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 14px; min-width: 0; }
+.stage-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; align-items: start; margin-bottom: 8px; }
+.stage-head p { margin: 4px 0 0; color: var(--muted); max-width: 72ch; font-size: 13px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px; }
+.legend span { font-family: var(--f-mono); font-size: 11px; padding: 2px 8px; border-radius: 999px; color: var(--on-k); }
+.svgwrap { overflow-x: auto; container-type: inline-size; }
+#topo { --ar: 0.640; width: 100%; min-width: 760px; height: min(calc(100cqw * var(--ar)), calc(100vh - 360px)); min-height: calc(760px * var(--ar)); display: block; }
+
+/* SVG */
+.edge { fill: none; stroke: var(--line); stroke-width: 1.5; transition: stroke 0.2s; }
+.e-pub { stroke-dasharray: 1 5; stroke-linecap: round; stroke-width: 2; }
+.e-dl { stroke-dasharray: 6 4; stroke: var(--k-dead); opacity: 0.6; }
+.edge.live { stroke: var(--live); stroke-width: 2.5; opacity: 1; }
+.arrow { fill: var(--line); }
+.box { fill: var(--panel); stroke: var(--ink); stroke-width: 1.4; transition: stroke 0.2s, fill 0.2s; }
+.node .title { font-family: var(--f-display); font-weight: 700; font-size: 15px; fill: var(--ink); }
+.node .sub { font-family: var(--f-mono); font-size: 10.5px; fill: var(--muted); }
+.node .status { font-family: var(--f-body); font-size: 11.5px; fill: var(--muted); font-style: italic; }
+.node.busy .box { stroke: var(--accent); stroke-width: 2.2; }
+.node.busy .status { fill: var(--accent); }
+.node.ok .box { stroke: var(--ok); stroke-width: 2.2; }
+.node.ok .status { fill: var(--ok); font-style: normal; font-weight: 600; }
+.node.bad .box { stroke: var(--bad); stroke-width: 2.2; }
+.node.bad .status { fill: var(--bad); font-style: normal; font-weight: 600; }
+.node.crash .box { stroke: var(--bad); stroke-width: 2.5; fill: var(--panel-2); }
+.node.crash .status { fill: var(--bad); font-style: normal; font-weight: 600; }
+.node.crash { animation: shake 0.4s 2; }
+@keyframes shake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+.ex .dia { fill: var(--panel-2); stroke: var(--ink); stroke-width: 1.4; transition: fill 0.15s; }
+.ex.hit .dia { fill: var(--accent); }
+.ex .letter { font-family: var(--f-display); font-weight: 800; font-size: 15px; fill: var(--ink); }
+.ex.hit .letter { fill: var(--on-k); }
+.ex .name { font-family: var(--f-mono); font-size: 11.5px; font-weight: 500; fill: var(--ink); }
+.ex .type { font-family: var(--f-mono); font-size: 10px; fill: var(--muted); }
+.q .qbox { fill: var(--panel); stroke: var(--line); stroke-width: 1.3; }
+.q .slot { fill: var(--panel-2); stroke: var(--line-2); stroke-width: 1; transition: fill 0.15s; }
+.q .slot.ready { fill: var(--accent); stroke: var(--accent); }
+.q .slot.unacked { fill: none; stroke: var(--accent); stroke-dasharray: 2 2; stroke-width: 1.5; }
+.q .name { font-family: var(--f-mono); font-size: 11.5px; font-weight: 500; fill: var(--ink); }
+.q .count { font-family: var(--f-mono); font-size: 10px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.q .key { font-family: var(--f-mono); font-size: 10px; fill: var(--k-cmd); }
+.q.dlq .qbox { stroke: var(--k-dead); stroke-dasharray: 4 3; }
+.q.dlq .slot.ready { fill: var(--k-dead); stroke: var(--k-dead); }
+.tiny { font-family: var(--f-mono); font-size: 9.5px; fill: var(--muted); }
+.tok rect { stroke: var(--panel); stroke-width: 1.5; }
+.tok text { font-family: var(--f-mono); font-size: 10.5px; font-weight: 500; fill: var(--on-k); }
+
+/* Side */
+.side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.saga-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.pill { font-family: var(--f-mono); font-size: 11.5px; font-weight: 500; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.pill.STARTED { border-color: var(--accent); color: var(--accent); }
+.pill.COMPENSATING { border-color: var(--k-comp); color: var(--k-comp); }
+.pill.COMPLETED { background: var(--ok); border-color: var(--ok); color: var(--on-k); }
+.pill.ABORTED { background: var(--k-comp); border-color: var(--k-comp); color: var(--on-k); }
+.pill.STUCK { background: var(--warn); border-color: var(--warn); color: var(--on-k); }
+#steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+#steps li { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 0; border-top: 1px solid var(--line-2); }
+#steps li:first-child { border-top: 0; }
+.tid { font-family: var(--f-display); font-weight: 800; font-size: 15px; color: var(--muted); }
+#steps b { display: block; font-weight: 600; }
+#steps small { display: block; color: var(--muted); font-size: 12px; line-height: 1.35; }
+.chip { font-family: var(--f-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.chip.active { border-color: var(--accent); color: var(--accent); animation: pulse 1.2s infinite; }
+.chip.done { background: var(--ok); border-color: var(--ok); color: var(--on-k); }
+.chip.failed { background: var(--bad); border-color: var(--bad); color: var(--on-k); }
+.chip.compensating { border-color: var(--k-comp); color: var(--k-comp); animation: pulse 1.2s infinite; }
+.chip.compensated { background: var(--k-comp); border-color: var(--k-comp); color: var(--on-k); }
+.chip.stuck { background: var(--warn); border-color: var(--warn); color: var(--on-k); }
+@keyframes pulse { 50% { opacity: 0.45; } }
+#sagaNote { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+#sagaNote:empty { display: none; }
+#sagaNote b { color: var(--ink); }
+.derived { margin: -4px 0 8px; font-size: 12px; color: var(--muted); }
+
+.inspector dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; margin: 10px 0; font-size: 12px; }
+.inspector dt { font-family: var(--f-mono); color: var(--muted); }
+.inspector dd { margin: 0; font-family: var(--f-mono); overflow-wrap: anywhere; }
+.inspector pre { margin: 0; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 6px; padding: 8px 10px; font-family: var(--f-mono); font-size: 11.5px; overflow-x: auto; max-height: 200px; }
+.kdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+
+.log-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.log-head span { font-size: 12px; color: var(--muted); }
+#log { list-style: none; margin: 0; padding: 0; max-height: 340px; overflow-y: auto; font-size: 12.5px; border-top: 1px solid var(--line-2); }
+#log li { display: grid; grid-template-columns: 58px 118px minmax(0, 1fr); gap: 10px; padding: 5px 2px; border-bottom: 1px solid var(--line-2); align-items: baseline; }
+#log .t { font-family: var(--f-mono); color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11.5px; }
+#log .v { font-family: var(--f-mono); font-size: 11px; font-weight: 500; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); justify-self: start; white-space: nowrap; }
+#log .m { min-width: 0; overflow-wrap: anywhere; }
+#log code { background: var(--panel-2); padding: 0 4px; border-radius: 3px; }
+.v.publish { border-color: var(--k-cmd) !important; color: var(--k-cmd); }
+.v.route { color: var(--muted); }
+.v.deliver { border-color: var(--accent) !important; color: var(--accent); }
+.v.ack { background: var(--ok); border-color: var(--ok) !important; color: var(--on-k); }
+.v.nack, .v.crash { background: var(--bad); border-color: var(--bad) !important; color: var(--on-k); }
+.v.dead { background: var(--k-dead); border-color: var(--k-dead) !important; color: var(--on-k); }
+.v.saga { background: var(--ink); border-color: var(--ink) !important; color: var(--bg); }
+.v.timeout, .v.warn { background: var(--warn); border-color: var(--warn) !important; color: var(--on-k); }
+.v.confirm { color: var(--ok); border-color: var(--ok) !important; }
+@media (max-width: 640px) { #log li { grid-template-columns: 50px minmax(0, 1fr); } #log .m { grid-column: 1 / -1; } }
+
+.glossary { background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 14px; }
+.glossary dl { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: 12px 24px; margin: 12px 0 0; }
+.glossary dt { font-family: var(--f-mono); font-weight: 500; font-size: 12.5px; }
+.glossary dd { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+@media (prefers-reduced-motion: reduce) { .node.crash, .chip.active, .chip.compensating { animation: none; } }
+</style>
+
+<div class="app">
+  <header class="top">
+    <div>
+      <h1>Saga over <span>RabbitMQ</span></h1>
+      <p>Watch a distributed order transaction move through exchanges, bindings and queues. Break a step and see the compensations run, or break the broker side and see redelivery and dead-lettering.</p>
+    </div>
+    <nav class="pages" aria-label="Simulations"><a href="index.html">← All simulators</a></nav>
+  </header>
+
+  <section class="controls" aria-label="Simulation controls">
+    <div class="field"><span>Coordination</span>
+      <div class="seg" role="group" aria-label="Coordination style">
+        <button id="mode-orch" type="button" aria-pressed="true">Orchestration</button>
+        <button id="mode-choreo" type="button" aria-pressed="false">Choreography</button>
+      </div>
+    </div>
+    <label class="field" for="outcome"><span>Business outcome</span>
+      <select id="outcome">
+        <option value="none">All steps succeed</option>
+        <option value="payment">Payment: card declined (T2)</option>
+        <option value="inventory" selected>Inventory: out of stock (T3)</option>
+        <option value="shipping">Shipping: no carrier slot (T4)</option>
+      </select>
+    </label>
+    <label class="field" for="fault"><span>Broker fault</span>
+      <select id="fault">
+        <option value="none" selected>None</option>
+        <option value="crash">Payment consumer dies before basic.ack</option>
+        <option value="poison">Inventory gets a poison message</option>
+      </select>
+    </label>
+    <div class="field"><span>Playback</span>
+      <div class="transport">
+        <button id="play" class="btn primary" type="button">Run</button>
+        <button id="step" class="btn" type="button" title="Run until the next message settles">Step</button>
+        <button id="reset" class="btn" type="button">Reset</button>
+      </div>
+    </div>
+    <div class="field"><span>Speed</span>
+      <div class="speed"><input id="speed" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Animation speed"><output id="speedOut">1×</output></div>
+    </div>
+  </section>
+
+  <main class="grid">
+    <section class="card stage">
+      <div class="stage-head">
+        <div>
+          <h2 id="stageTitle">Topology</h2>
+          <p id="stageDesc"></p>
+        </div>
+        <div class="legend" aria-label="Message colours">
+          <span style="background:var(--k-cmd)">command</span>
+          <span style="background:var(--k-evt)">event</span>
+          <span style="background:var(--k-reply)">reply</span>
+          <span style="background:var(--k-fail)">failure</span>
+          <span style="background:var(--k-comp)">compensation</span>
+          <span style="background:var(--k-dead)">dead-lettered</span>
+        </div>
+      </div>
+      <div class="svgwrap"><svg id="topo" viewBox="0 0 1000 640" role="img" aria-label="RabbitMQ topology: services, exchanges, bindings and queues"></svg></div>
+    </section>
+
+    <aside class="side">
+      <section class="card saga">
+        <div class="saga-head"><h2>Saga state</h2><span id="sagaStatus" class="pill">NOT STARTED</span></div>
+        <p class="derived" id="sagaDerived"></p>
+        <ol id="steps"></ol>
+        <p id="sagaNote"></p>
+      </section>
+      <section class="card inspector">
+        <h2>Last message</h2>
+        <dl id="props"><dt>—</dt><dd>Nothing published yet</dd></dl>
+        <pre id="body">{}</pre>
+      </section>
+    </aside>
+
+    <section class="card log">
+      <div class="log-head"><h2>Broker trace</h2><span>AMQP 0-9-1 methods as the broker sees them</span></div>
+      <ol id="log"></ol>
+    </section>
+  </main>
+
+  <section class="glossary">
+    <h2>RabbitMQ terms used here</h2>
+    <dl>
+      <div><dt>Exchange</dt><dd>Receives every publish and decides which queues get a copy. <b>direct</b> matches the routing key exactly, <b>topic</b> matches dotted patterns with <code>*</code> and <code>#</code>, <b>fanout</b> ignores the key.</dd></div>
+      <div><dt>(AMQP default) exchange</dt><dd>The nameless direct exchange <code>""</code>. Every queue is implicitly bound to it under its own name, which is why replies can be published straight to <code>reply_to</code>.</dd></div>
+      <div><dt>Binding / binding key</dt><dd>A rule linking an exchange to a queue. The keys are listed under each queue in the diagram.</dd></div>
+      <div><dt>Queue: ready / unacked</dt><dd>Ready messages wait for a consumer. Unacked ones are delivered but not yet confirmed; the broker keeps them until <code>basic.ack</code>.</dd></div>
+      <div><dt>basic.publish · basic.deliver · basic.ack</dt><dd>Producer sends; broker pushes to a consumer with a <code>delivery_tag</code>; consumer confirms and the broker deletes the message.</dd></div>
+      <div><dt>Publisher confirms</dt><dd>The broker acks the producer once the message is safely in every routed queue. Pair it with an outbox table so the DB write and the publish can't diverge.</dd></div>
+      <div><dt>redelivered flag</dt><dd>Set when a message comes back after its consumer died before acking. Handlers must be idempotent, keyed here by <code>x-idempotency-key</code>.</dd></div>
+      <div><dt>basic.nack requeue=false</dt><dd>The consumer gives up on a message without putting it back, so a poison message cannot loop forever.</dd></div>
+      <div><dt>Dead letter exchange (DLX)</dt><dd>Queue argument <code>x-dead-letter-exchange</code>. Rejected or expired messages are republished there with an <code>x-death</code> header and land in <code>saga.dlq</code>.</dd></div>
+      <div><dt>correlation_id · reply_to</dt><dd>RPC-style properties. The orchestrator puts the saga id in <code>correlation_id</code> and its own queue in <code>reply_to</code> to match replies to sagas.</dd></div>
+      <div><dt>Compensating transaction</dt><dd>The semantic undo for a completed step (refund, release stock, cancel order), run in reverse order when a later step fails.</dd></div>
+      <div><dt>Orchestration vs choreography</dt><dd>One coordinator sending commands and owning the state, or services reacting to each other's events with no single owner.</dd></div>
+    </dl>
+  </section>
+</div>
+
+<script>
+(() => {
+const NS = 'http://www.w3.org/2000/svg';
+const $ = s => document.querySelector(s);
+const Y = { payment: 140, inventory: 310, shipping: 480 };
+const C = 310;
+const SVCS = ['payment', 'inventory', 'shipping'];
+const NAME = { orch: 'Orchestrator', order: 'Order service', payment: 'Payment', inventory: 'Inventory', shipping: 'Shipping' };
+const CONSUMER = { orch: 'order-saga', order: 'order-svc', payment: 'payment-svc', inventory: 'inventory-svc', shipping: 'shipping-svc' };
+
+const S = { mode: 'orch', outcome: 'inventory', fault: 'none', speed: 1 };
+const RUN = { gen: 0, playing: false, stepping: false, running: false, done: false, simT: 0, confirmed: false };
+const CANCEL = Symbol('cancel');
+let TOPO, TOKLAYER, SAGA, PATH = {}, NODE = {}, EXEL = {}, QUEUE = {}, TAGS = {};
+
+const hex = n => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function txt(parent, x, y, s, cls, anchor = 'middle') {
+  const t = el('text', { x, y, class: cls, 'text-anchor': anchor }, parent);
+  t.textContent = s;
+  return t;
+}
+
+/* ---------- Topology ---------- */
+function topology(mode) {
+  const orch = mode === 'orch';
+  const origin = orch ? { id: 'orch', title: 'Orchestrator', sub: 'order-saga · owns state' }
+                      : { id: 'order', title: 'Order service', sub: 'order-svc' };
+  const nodes = [{ ...origin, x: 120, y: C, w: 170, h: 96 },
+    ...SVCS.map(s => ({ id: s, title: NAME[s], sub: CONSUMER[s], x: 880, y: Y[s], w: 140, h: 76 }))];
+  const center = orch ? 'saga.commands' : 'saga.events';
+  const back = orch ? 'default' : 'saga.events';
+  const exchanges = orch
+    ? [{ id: 'saga.commands', type: 'direct', x: 400, y: C, r: 30 },
+       { id: 'default', label: '(AMQP default)', type: 'direct · implicit bindings', letter: 'D', x: 400, y: 595, r: 26 }]
+    : [{ id: 'saga.events', type: 'topic', x: 400, y: C, r: 30 }];
+  exchanges.push({ id: 'saga.dlx', type: 'fanout', x: 650, y: 40, r: 22, side: true });
+  const svcQ = s => orch ? `${s}.commands` : `${s}.inbox`;
+  const inbox = orch ? 'orchestrator.replies' : 'order.inbox';
+  const queues = [
+    ...SVCS.map(s => ({ id: svcQ(s), owner: s, x: 650, y: Y[s] })),
+    { id: inbox, owner: origin.id, x: 120, y: 480, below: true },
+    { id: 'saga.dlq', owner: null, x: 880, y: 40, dlq: true },
+  ];
+  if (!orch) queues.push({ id: 'saga.audit', owner: null, x: 120, y: 140 });
+  const bindings = orch ? [
+    { ex: 'saga.commands', q: 'payment.commands', keys: ['payment.charge', 'payment.refund'] },
+    { ex: 'saga.commands', q: 'inventory.commands', keys: ['inventory.reserve', 'inventory.release'] },
+    { ex: 'saga.commands', q: 'shipping.commands', keys: ['shipping.schedule'] },
+    { ex: 'saga.dlx', q: 'saga.dlq', keys: [] },
+  ] : [
+    { ex: 'saga.events', q: 'payment.inbox', keys: ['order.created', 'inventory.rejected', 'inventory.released'] },
+    { ex: 'saga.events', q: 'inventory.inbox', keys: ['payment.charged', 'shipping.failed'] },
+    { ex: 'saga.events', q: 'shipping.inbox', keys: ['inventory.reserved'] },
+    { ex: 'saga.events', q: 'order.inbox', keys: ['payment.declined', 'payment.refunded', 'shipping.scheduled'] },
+    { ex: 'saga.events', q: 'saga.audit', keys: ['#'] },
+    { ex: 'saga.dlx', q: 'saga.dlq', keys: [] },
+  ];
+  const paths = {};
+  paths[`pub:${origin.id}:${center}`] = `M205 ${C} H370`;
+  for (const s of SVCS) {
+    const y = Y[s];
+    paths[`pub:${s}:${back}`] = orch ? `M950 ${y} H978 V595 H426` : `M950 ${y} H978 V595 H400 V340`;
+    paths[`b:${center}:${svcQ(s)}`] = `M430 ${C} C 505 ${C}, 500 ${y}, 575 ${y}`;
+    paths[`c:${svcQ(s)}`] = `M725 ${y} H810`;
+  }
+  paths[`b:${back}:${inbox}`] = orch ? `M374 595 C 290 595, 240 480, 195 480` : `M385 325 C 320 390, 260 480, 195 480`;
+  paths[`c:${inbox}`] = `M120 463 V358`;
+  if (!orch) paths['b:saga.events:saga.audit'] = `M385 295 C 320 230, 260 140, 195 140`;
+  const invQ = svcQ('inventory');
+  paths[`dl:${invQ}`] = `M585 ${Y.inventory - 17} V ${Y.inventory - 44} H548 V84 H650 V62`;
+  paths['b:saga.dlx:saga.dlq'] = `M672 40 H805`;
+  return { orch, origin: origin.id, nodes, exchanges, queues, bindings, paths };
+}
+
+function render() {
+  TOPO = topology(S.mode);
+  const svg = $('#topo');
+  svg.innerHTML = '';
+  PATH = {}; NODE = {}; EXEL = {}; QUEUE = {}; TAGS = {};
+  const defs = el('defs', {}, svg);
+  const mk = el('marker', { id: 'arr', viewBox: '0 0 8 8', refX: 7, refY: 4, markerWidth: 6, markerHeight: 6, orient: 'auto' }, defs);
+  el('path', { d: 'M0 0 L8 4 L0 8 z', class: 'arrow' }, mk);
+  const gE = el('g', {}, svg), gN = el('g', {}, svg);
+  TOKLAYER = el('g', {}, svg);
+
+  for (const [id, d] of Object.entries(TOPO.paths)) {
+    PATH[id] = el('path', { d, class: `edge e-${id.split(':')[0]}`, 'marker-end': 'url(#arr)' }, gE);
+  }
+  txt(gE, 600, 78, 'dead-letter', 'tiny');
+
+  for (const n of TOPO.nodes) {
+    const g = el('g', { class: 'node' }, gN);
+    el('rect', { x: n.x - n.w / 2, y: n.y - n.h / 2, width: n.w, height: n.h, rx: 10, class: 'box' }, g);
+    const big = n.h > 80;
+    txt(g, n.x, n.y - (big ? 16 : 10), n.title, 'title');
+    txt(g, n.x, n.y + (big ? 2 : 6), n.sub, 'sub');
+    const st = txt(g, n.x, n.y + (big ? 26 : 24), 'idle', 'status');
+    NODE[n.id] = { g, st };
+  }
+  for (const x of TOPO.exchanges) {
+    const g = el('g', { class: 'ex' }, gN);
+    el('polygon', { points: `${x.x},${x.y - x.r} ${x.x + x.r},${x.y} ${x.x},${x.y + x.r} ${x.x - x.r},${x.y}`, class: 'dia' }, g);
+    txt(g, x.x, x.y + 5, x.letter || x.type[0].toUpperCase(), 'letter');
+    if (x.side) {
+      txt(g, x.x - x.r - 8, x.y - 1, x.label || x.id, 'name', 'end');
+      txt(g, x.x - x.r - 8, x.y + 12, x.type, 'type', 'end');
+    } else {
+      txt(g, x.x, x.y - x.r - 20, x.label || x.id, 'name');
+      txt(g, x.x, x.y - x.r - 8, x.type, 'type');
+    }
+    EXEL[x.id] = g;
+  }
+  for (const q of TOPO.queues) {
+    const g = el('g', { class: 'q' + (q.dlq ? ' dlq' : '') }, gN);
+    el('rect', { x: q.x - 75, y: q.y - 17, width: 150, height: 34, rx: 4, class: 'qbox' }, g);
+    const slots = [];
+    for (let i = 0; i < 8; i++) slots.push(el('rect', { x: q.x - 75 + 8.5 + i * 17, y: q.y - 9, width: 14, height: 18, rx: 2, class: 'slot' }, g));
+    let ly;
+    if (q.below) { txt(g, q.x, q.y + 31, q.id, 'name'); ly = q.y + 45; }
+    else { txt(g, q.x, q.y - 24, q.id, 'name'); ly = q.y + 30; }
+    const count = txt(g, q.x, ly, '', 'count');
+    if (!q.dlq) {
+      const keys = q.id === 'orchestrator.replies' ? ['↳ implicit: orchestrator.replies']
+        : TOPO.bindings.filter(b => b.q === q.id).flatMap(b => b.keys.map(k => '↳ ' + k));
+      keys.forEach((k, i) => txt(g, q.x, ly + 13 + i * 12, k, 'key'));
+    }
+    QUEUE[q.id] = { ...q, g, slots, count, ready: 0, unacked: 0 };
+    drawQueue(q.id);
+  }
+}
+
+function drawQueue(id) {
+  const q = QUEUE[id];
+  q.slots.forEach((s, i) => {
+    const fromHead = 7 - i;
+    s.setAttribute('class', 'slot' + (fromHead < q.unacked ? ' unacked' : fromHead < q.unacked + q.ready ? ' ready' : ''));
+  });
+  q.count.textContent = `ready ${q.ready} · unacked ${q.unacked}`;
+}
+function qAdd(id, r, u) { const q = QUEUE[id]; q.ready += r; q.unacked += u; drawQueue(id); }
+function setNode(id, text, cls = '') {
+  const n = NODE[id]; if (!n) return;
+  n.g.setAttribute('class', 'node' + (cls ? ' ' + cls : ''));
+  if (text != null) n.st.textContent = text;
+}
+function hitEx(id) { const g = EXEL[id]; if (!g) return; g.classList.add('hit'); setTimeout(() => g.classList.remove('hit'), 450); }
+
+/* ---------- Timing ---------- */
+const active = () => RUN.playing || RUN.stepping;
+function sleep(g, ms) {
+  return new Promise((res, rej) => {
+    let t = 0, last = performance.now();
+    (function tick(now) {
+      if (g !== RUN.gen) return rej(CANCEL);
+      const dt = Math.min(64, now - last); last = now;
+      if (active()) { t += dt * S.speed; RUN.simT += dt * S.speed; }
+      if (t >= ms) res(); else requestAnimationFrame(tick);
+    })(last);
+  });
+}
+async function checkpoint(g) {
+  if (RUN.stepping) { RUN.stepping = false; syncControls(); }
+  while (!active()) { await new Promise(r => requestAnimationFrame(r)); if (g !== RUN.gen) throw CANCEL; }
+}
+function makeToken(m) {
+  const g = el('g', { class: 'tok', visibility: 'hidden' }, TOKLAYER);
+  const w = m.rk.length * 6.4 + 18;
+  const rect = el('rect', { x: -w / 2, y: -10, width: w, height: 20, rx: 10 }, g);
+  txt(g, 0, 4, m.rk, '');
+  const tok = { el: g, color: '', setKind(k) { this.color = `var(--k-${k})`; rect.setAttribute('style', `fill:${this.color}`); } };
+  tok.setKind(m.kind);
+  return tok;
+}
+function travel(g, tok, id, reverse = false) {
+  const p = PATH[id];
+  if (!p) { console.warn('missing path', id); return Promise.resolve(); }
+  const len = p.getTotalLength();
+  p.style.setProperty('--live', tok.color);
+  p.classList.add('live');
+  const place = d => { const pt = p.getPointAtLength(reverse ? len - d : d); tok.el.setAttribute('transform', `translate(${pt.x},${pt.y})`); };
+  place(0); tok.el.setAttribute('visibility', 'visible');
+  return new Promise((res, rej) => {
+    let d = 0, last = performance.now();
+    (function tick(now) {
+      if (g !== RUN.gen) return rej(CANCEL);
+      const dt = Math.min(64, now - last); last = now;
+      if (active()) { d += dt * 0.34 * S.speed; RUN.simT += dt * S.speed; }
+      place(Math.min(d, len));
+      if (d >= len) { p.classList.remove('live'); res(); } else requestAnimationFrame(tick);
+    })(last);
+  });
+}
+
+/* ---------- Routing ---------- */
+function topicMatch(pattern, key) {
+  const p = pattern.split('.'), k = key.split('.');
+  const m = (i, j) => {
+    if (i === p.length) return j === k.length;
+    if (p[i] === '#') { for (let x = j; x <= k.length; x++) if (m(i + 1, x)) return true; return false; }
+    if (j === k.length) return false;
+    return (p[i] === '*' || p[i] === k[j]) && m(i + 1, j + 1);
+  };
+  return m(0, 0);
+}
+function route(exId, rk) {
+  if (exId === 'default') return QUEUE[rk] ? [{ q: rk, key: rk }] : [];
+  const ex = TOPO.exchanges.find(x => x.id === exId);
+  const out = [];
+  for (const b of TOPO.bindings.filter(b => b.ex === exId)) {
+    const key = ex.type === 'fanout' ? '' : b.keys.find(k => ex.type === 'topic' ? topicMatch(k, rk) : k === rk);
+    if (key !== undefined) out.push({ q: b.q, key });
+  }
+  return out.sort((a, b) => (QUEUE[b.q].owner ? 1 : 0) - (QUEUE[a.q].owner ? 1 : 0));
+}
+
+/* ---------- Panels ---------- */
+const STEP_DEFS = {
+  orch: [
+    { name: 'Create order', where: 'orchestrator, local transaction', comp: 'cancel order (local)' },
+    { name: 'Charge card', where: 'payment.charge → payment-svc', comp: 'payment.refund' },
+    { name: 'Reserve stock', where: 'inventory.reserve → inventory-svc', comp: 'inventory.release' },
+    { name: 'Schedule shipment', where: 'shipping.schedule → shipping-svc', comp: 'none, last step' },
+  ],
+  choreo: [
+    { name: 'Create order', where: 'order-svc emits order.created', comp: 'cancel on payment.declined / payment.refunded' },
+    { name: 'Charge card', where: 'payment-svc emits payment.charged', comp: 'refund on inventory.rejected / inventory.released' },
+    { name: 'Reserve stock', where: 'inventory-svc emits inventory.reserved', comp: 'release on shipping.failed' },
+    { name: 'Schedule shipment', where: 'shipping-svc emits shipping.scheduled', comp: 'none, last step' },
+  ],
+};
+const STEP_STATE = [];
+function renderSteps() {
+  const ol = $('#steps'); ol.innerHTML = '';
+  STEP_DEFS[S.mode].forEach((s, i) => {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="tid">T${i + 1}</span><div><b>${s.name}</b><small>${s.where}<br>↺ ${s.comp}</small></div><span class="chip">pending</span>`;
+    ol.appendChild(li);
+    STEP_STATE[i] = li.querySelector('.chip');
+  });
+  $('#sagaDerived').textContent = S.mode === 'orch'
+    ? 'Stored in the orchestrator\'s saga table, keyed by correlation_id.'
+    : 'No saga row exists anywhere. This view is rebuilt from events piling up in saga.audit.';
+}
+function step(i, status) { const c = STEP_STATE[i]; c.className = 'chip ' + status; c.textContent = status; }
+function setSaga(s) { const p = $('#sagaStatus'); p.className = 'pill ' + s; p.textContent = s; }
+function note(html) { $('#sagaNote').innerHTML = html; }
+
+function log(cls, verb, html) {
+  const li = document.createElement('li');
+  li.innerHTML = `<span class="t">${(RUN.simT / 1000).toFixed(1)}s</span><span class="v ${cls}">${verb}</span><span class="m">${html}</span>`;
+  const ol = $('#log');
+  ol.appendChild(li);
+  ol.scrollTop = ol.scrollHeight;
+}
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const exLabel = id => id === 'default' ? '"" (AMQP default)' : id;
+function inspect(m) {
+  const rows = [
+    ['exchange', exLabel(m.ex)],
+    ['routing_key', m.rk],
+    ['type', m.type],
+    ['message_id', m.message_id],
+    ['correlation_id', m.props.correlation_id],
+  ];
+  if (m.props.reply_to) rows.push(['reply_to', m.props.reply_to]);
+  rows.push(['delivery_mode', '2 (persistent)'], ['content_type', 'application/json']);
+  for (const [k, v] of Object.entries(m.headers)) rows.push([`headers.${k}`, typeof v === 'string' ? v : JSON.stringify(v)]);
+  if (m.delivery_tag != null) rows.push(['delivery_tag', String(m.delivery_tag)], ['redelivered', String(m.redelivered)]);
+  $('#props').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${k === 'routing_key' ? `<span class="kdot" style="background:var(--k-${m.kind})"></span>` : ''}${esc(v)}</dd>`).join('');
+  $('#body').textContent = JSON.stringify(m.body, null, 2);
+}
+
+/* ---------- One message: publish → route → deliver → ack ---------- */
+function deliver(q, owner, m) {
+  TAGS[owner] = (TAGS[owner] || 0) + 1;
+  m.delivery_tag = TAGS[owner];
+  qAdd(q, -1, 1);
+  inspect(m);
+  log('deliver', 'basic.deliver', `<code>${q}</code> → consumer <b>${CONSUMER[owner]}</b> · delivery_tag ${m.delivery_tag} · redelivered=${m.redelivered}`);
+}
+async function hop(g, m, o = {}) {
+  m.message_id = 'msg-' + hex(6);
+  m.redelivered = false; m.delivery_tag = null;
+  inspect(m);
+  setNode(m.from, 'publishing ' + m.rk, 'busy');
+  log('publish', 'basic.publish', `<b>${NAME[m.from]}</b> → exchange <code>${exLabel(m.ex)}</code> · routing_key <code>${m.rk}</code>${m.props.reply_to ? ` · reply_to <code>${m.props.reply_to}</code>` : ''}`);
+  const tok = makeToken(m);
+  await travel(g, tok, `pub:${m.from}:${m.ex}`);
+  setNode(m.from, o.fromAfter || 'idle', o.fromAfterCls || '');
+  hitEx(m.ex);
+  const hits = route(m.ex, m.rk);
+  if (!hits.length) { log('warn', 'unroutable', `No binding matches <code>${m.rk}</code>; the message is dropped.`); tok.el.remove(); return 'unroutable'; }
+  const ex = TOPO.exchanges.find(x => x.id === m.ex);
+  log('route', 'route', m.ex === 'default'
+    ? `Default exchange delivers to the queue named <code>${m.rk}</code>.`
+    : `${ex.type} exchange matched ${hits.map(h => `<code>${h.key}</code> → <code>${h.q}</code>`).join(', ')}`);
+  if (!RUN.confirmed) {
+    RUN.confirmed = true;
+    log('confirm', 'confirm', 'Broker sends basic.ack to the publisher (publisher confirms). The message is persisted in every routed queue, so the outbox row can be marked sent.');
+  }
+  const toks = hits.map((h, i) => i === 0 ? tok : makeToken(m));
+  await Promise.all(hits.map((h, i) => travel(g, toks[i], `b:${m.ex}:${h.q}`)));
+  hits.forEach((h, i) => { qAdd(h.q, 1, 0); if (i > 0) toks[i].el.remove(); });
+  if (hits.length > 1 && QUEUE['saga.audit'].ready === 1) log('route', 'route', `<code>saga.audit</code> has no consumer, so its copies stay ready. That queue is the only shared record of this saga.`);
+  await sleep(g, 380);
+
+  const q = hits[0].q, owner = QUEUE[q].owner;
+  deliver(q, owner, m);
+  await travel(g, tok, `c:${q}`);
+
+  if (o.poison) {
+    setNode(owner, 'cannot parse payload', 'bad');
+    await sleep(g, 500);
+    log('nack', 'basic.nack', `${CONSUMER[owner]} fails schema validation (<code>qty</code> is "two") and nacks delivery_tag ${m.delivery_tag} with <code>requeue=false</code>, so the message can't loop forever.`);
+    qAdd(q, 0, -1);
+    await travel(g, tok, `c:${q}`, true);
+    tok.setKind('dead'); m.kind = 'dead';
+    m.headers['x-death'] = [{ reason: 'rejected', queue: q, exchange: m.ex, 'routing-keys': [m.rk], count: 1 }];
+    m.headers['x-first-death-reason'] = 'rejected';
+    inspect(m);
+    log('dead', 'dead-letter', `<code>${q}</code> is declared with <code>x-dead-letter-exchange=saga.dlx</code>. The broker republishes the message there and adds an <code>x-death</code> header.`);
+    await travel(g, tok, `dl:${q}`);
+    hitEx('saga.dlx');
+    await travel(g, tok, 'b:saga.dlx:saga.dlq');
+    qAdd('saga.dlq', 1, 0);
+    tok.el.remove();
+    setNode(owner, 'idle', '');
+    log('dead', 'parked', `Message parked in <code>saga.dlq</code>. Nothing consumes it until someone inspects it.`);
+    return 'dead';
+  }
+  if (o.crash) {
+    setNode(owner, 'processing…', 'busy');
+    await sleep(g, 700);
+    log('saga', 'side effect', `${CONSUMER[owner]} ${o.crash} and stores the result under <code>${m.headers['x-idempotency-key']}</code>.`);
+    await sleep(g, 300);
+    setNode(owner, 'process killed', 'crash');
+    log('crash', 'channel closed', `${CONSUMER[owner]} dies before sending basic.ack. The broker sees the channel close and returns unacked delivery_tag ${m.delivery_tag} to <code>${q}</code>.`);
+    qAdd(q, 0, -1);
+    await travel(g, tok, `c:${q}`, true);
+    qAdd(q, 1, 0);
+    await sleep(g, 900);
+    setNode(owner, 'restarted', 'busy');
+    m.redelivered = true;
+    deliver(q, owner, m);
+    await travel(g, tok, `c:${q}`);
+    log('saga', 'idempotency', `redelivered=true, so ${CONSUMER[owner]} checks <code>${m.headers['x-idempotency-key']}</code>, finds the stored result and skips the side effect. The card is not charged twice.`);
+  }
+  setNode(owner, 'processing…', 'busy');
+  await sleep(g, 750);
+  qAdd(q, 0, -1);
+  log('ack', 'basic.ack', `${CONSUMER[owner]} acks delivery_tag ${m.delivery_tag}; the broker removes it from <code>${q}</code>.`);
+  tok.el.remove();
+  setNode(owner, o.result || 'idle', o.resultCls || '');
+  return 'ok';
+}
+
+/* ---------- Message builders ---------- */
+function command(rk, stepId, body, comp = false) {
+  return { from: 'orch', ex: 'saga.commands', rk, kind: comp ? 'comp' : 'cmd', type: rk,
+    props: { correlation_id: SAGA.id, reply_to: 'orchestrator.replies' },
+    headers: { 'x-saga-step': stepId, 'x-idempotency-key': `${SAGA.id}:${rk}` }, body };
+}
+function reply(from, type, stepId, body, kind = 'reply') {
+  return { from, ex: 'default', rk: 'orchestrator.replies', kind, type,
+    props: { correlation_id: SAGA.id }, headers: { 'x-saga-step': stepId }, body };
+}
+function event(from, rk, stepId, body, kind = 'evt') {
+  return { from, ex: 'saga.events', rk, kind, type: rk,
+    props: { correlation_id: SAGA.id },
+    headers: { 'x-saga-step': stepId, 'x-idempotency-key': `${SAGA.id}:${rk}` }, body };
+}
+
+/* ---------- Orchestration ---------- */
+async function runOrch(g) {
+  const fail = S.outcome, fault = S.fault;
+  const { id, orderId, amount, sku, chargeId } = SAGA;
+  setSaga('STARTED');
+  step(0, 'active');
+  setNode('orch', 'BEGIN; INSERT saga, order', 'busy');
+  log('saga', 'local tx', `Orchestrator inserts saga <b>${id}</b> (STARTED), order <b>${orderId}</b> (PENDING) and the first command into its outbox, in one DB transaction.`);
+  await sleep(g, 900);
+  step(0, 'done');
+  setNode('orch', 'idle');
+  await checkpoint(g);
+
+  step(1, 'active');
+  await hop(g, command('payment.charge', 'T2', { orderId, amount, currency: 'EUR', card: 'tok_visa_4242' }),
+    { fromAfter: 'awaiting reply', crash: fault === 'crash' ? `charges ${amount} EUR (${chargeId})` : null,
+      result: fail === 'payment' ? 'card declined' : 'charged', resultCls: fail === 'payment' ? 'bad' : 'ok' });
+  await checkpoint(g);
+  if (fail === 'payment') {
+    await hop(g, reply('payment', 'payment.declined', 'T2', { orderId, reason: 'card_declined' }, 'fail'), { result: 'card declined', resultCls: 'bad' });
+    step(1, 'failed');
+    setSaga('COMPENSATING');
+    await checkpoint(g);
+    await localCancel(g);
+    return finish('ABORTED', `Payment was the first remote step, so the only thing to undo is the orchestrator's own order row. No refund needed because nothing was charged.`);
+  }
+  await hop(g, reply('payment', 'payment.charged', 'T2', { orderId, chargeId }), { result: 'saga updated' });
+  step(1, 'done');
+  await checkpoint(g);
+
+  step(2, 'active');
+  const r = await hop(g, command('inventory.reserve', 'T3', { orderId, sku, qty: fault === 'poison' ? 'two' : 2 }),
+    { fromAfter: 'awaiting reply', poison: fault === 'poison',
+      result: fail === 'inventory' ? 'out of stock' : 'reserved', resultCls: fail === 'inventory' ? 'bad' : 'ok' });
+  await checkpoint(g);
+  if (r === 'dead') {
+    for (let s = 30; s >= 0; s -= 2) { setNode('orch', `awaiting reply · ${s}s left`, 'busy'); await sleep(g, 110); }
+    log('timeout', 'deadline', `No message with correlation_id <code>${id}</code> arrived on <code>orchestrator.replies</code> within the 30 s step deadline. The orchestrator owns the saga, so it decides: give up on T3 and compensate.`);
+    setNode('orch', 'compensating', 'bad');
+    step(2, 'failed');
+    setSaga('COMPENSATING');
+    await checkpoint(g);
+    await compPayment(g);
+    await localCancel(g);
+    return finish('ABORTED', `The poison message sits in <b>saga.dlq</b>, but the saga still finished cleanly because the orchestrator ran a timer on the step. A cautious orchestrator would also send <code>inventory.release</code>, which is harmless when nothing was reserved.`);
+  }
+  if (fail === 'inventory') {
+    await hop(g, reply('inventory', 'inventory.rejected', 'T3', { orderId, sku, available: 0 }, 'fail'), { result: 'compensating', resultCls: 'bad' });
+    step(2, 'failed');
+    setSaga('COMPENSATING');
+    await checkpoint(g);
+    await compPayment(g);
+    await localCancel(g);
+    return finish('ABORTED', `T3 failed, so the orchestrator walked back through the completed steps in reverse: refund T2, then cancel T1. Every undo is a new forward message, not a rollback.`);
+  }
+  await hop(g, reply('inventory', 'inventory.reserved', 'T3', { orderId, sku, reservationId: 'rsv_' + hex(5) }), { result: 'saga updated' });
+  step(2, 'done');
+  await checkpoint(g);
+
+  step(3, 'active');
+  await hop(g, command('shipping.schedule', 'T4', { orderId, address: 'Lindenstr. 12, 10969 Berlin', parcels: 1 }),
+    { fromAfter: 'awaiting reply', result: fail === 'shipping' ? 'no carrier slot' : 'scheduled', resultCls: fail === 'shipping' ? 'bad' : 'ok' });
+  await checkpoint(g);
+  if (fail === 'shipping') {
+    await hop(g, reply('shipping', 'shipping.failed', 'T4', { orderId, reason: 'no_carrier_capacity' }, 'fail'), { result: 'compensating', resultCls: 'bad' });
+    step(3, 'failed');
+    setSaga('COMPENSATING');
+    await checkpoint(g);
+    step(2, 'compensating');
+    await hop(g, command('inventory.release', 'T3-undo', { orderId, sku, qty: 2 }, true), { fromAfter: 'awaiting reply', result: 'stock released' });
+    await checkpoint(g);
+    await hop(g, reply('inventory', 'inventory.released', 'T3-undo', { orderId }, 'comp'), { result: 'saga updated' });
+    step(2, 'compensated');
+    await checkpoint(g);
+    await compPayment(g);
+    await localCancel(g);
+    return finish('ABORTED', `The last step failed, so all three earlier steps were compensated in reverse order: release stock, refund card, cancel order.`);
+  }
+  await hop(g, reply('shipping', 'shipping.scheduled', 'T4', { orderId, trackingNo: 'DHL' + hex(8).toUpperCase() }), { result: 'saga updated' });
+  step(3, 'done');
+  setNode('orch', 'saga COMPLETED', 'ok');
+  log('saga', 'local tx', `Orchestrator marks saga <b>${id}</b> COMPLETED and order <b>${orderId}</b> CONFIRMED.`);
+  return finish('COMPLETED', `Four local transactions in four services, chained by commands and replies. No distributed lock and no two-phase commit.`);
+}
+async function compPayment(g) {
+  step(1, 'compensating');
+  await hop(g, command('payment.refund', 'T2-undo', { orderId: SAGA.orderId, chargeId: SAGA.chargeId, amount: SAGA.amount }, true), { fromAfter: 'awaiting reply', result: 'refunded' });
+  await checkpoint(g);
+  await hop(g, reply('payment', 'payment.refunded', 'T2-undo', { orderId: SAGA.orderId, refundId: 're_' + hex(6) }, 'comp'), { result: 'saga updated' });
+  step(1, 'compensated');
+  await checkpoint(g);
+}
+async function localCancel(g) {
+  step(0, 'compensating');
+  setNode('orch', 'UPDATE order CANCELLED', 'busy');
+  log('saga', 'local tx', `Orchestrator sets order <b>${SAGA.orderId}</b> to CANCELLED and saga <b>${SAGA.id}</b> to ABORTED.`);
+  await sleep(g, 800);
+  step(0, 'compensated');
+  setNode('orch', 'saga ABORTED', 'bad');
+}
+
+/* ---------- Choreography ---------- */
+async function runChoreo(g) {
+  const fail = S.outcome, fault = S.fault;
+  const { orderId, amount, sku, chargeId } = SAGA;
+  setSaga('STARTED');
+  step(0, 'active');
+  setNode('order', 'BEGIN; INSERT order + outbox', 'busy');
+  log('saga', 'local tx', `Order service writes order <b>${orderId}</b> (PENDING) and an <code>order.created</code> outbox row in one transaction. There is no saga table.`);
+  await sleep(g, 900);
+  step(0, 'done');
+  await checkpoint(g);
+
+  step(1, 'active');
+  await hop(g, event('order', 'order.created', 'T1', { orderId, amount, currency: 'EUR', items: [{ sku, qty: 2 }] }),
+    { fromAfter: 'PENDING', crash: fault === 'crash' ? `charges ${amount} EUR (${chargeId})` : null,
+      result: fail === 'payment' ? 'card declined' : 'charged', resultCls: fail === 'payment' ? 'bad' : 'ok' });
+  await checkpoint(g);
+  if (fail === 'payment') {
+    step(1, 'failed');
+    setSaga('COMPENSATING');
+    step(0, 'compensating');
+    await hop(g, event('payment', 'payment.declined', 'T2', { orderId, reason: 'card_declined' }, 'fail'), { fromAfter: 'card declined', fromAfterCls: 'bad', result: 'order CANCELLED', resultCls: 'bad' });
+    step(0, 'compensated');
+    return finish('ABORTED', `Order service is bound to <code>payment.declined</code> and cancels itself. Each service only knows which events it listens to.`);
+  }
+  step(1, 'done');
+  step(2, 'active');
+  const r = await hop(g, event('payment', 'payment.charged', 'T2', { orderId, chargeId, items: [{ sku, qty: fault === 'poison' ? 'two' : 2 }] }),
+    { fromAfter: 'charged', fromAfterCls: 'ok', poison: fault === 'poison',
+      result: fail === 'inventory' ? 'out of stock' : 'reserved', resultCls: fail === 'inventory' ? 'bad' : 'ok' });
+  await checkpoint(g);
+  if (r === 'dead') {
+    step(2, 'stuck');
+    setNode('order', 'PENDING (forever?)', 'bad');
+    log('warn', 'no owner', `Nobody is waiting for <code>inventory.reserved</code>. Payment has taken the money, the order stays PENDING, and no component owns a deadline for this saga.`);
+    return finish('STUCK', `This is the classic choreography gap. Fix it with a timeout owner: a scheduled job that scans PENDING orders, or a per-order delay message (a TTL queue that dead-letters back into <code>saga.events</code>) that fires <code>order.timed_out</code>. Then someone replays or discards <b>saga.dlq</b>.`);
+  }
+  if (fail === 'inventory') {
+    step(2, 'failed');
+    setSaga('COMPENSATING');
+    step(1, 'compensating');
+    await hop(g, event('inventory', 'inventory.rejected', 'T3', { orderId, chargeId, sku, available: 0 }, 'fail'), { fromAfter: 'out of stock', fromAfterCls: 'bad', result: 'refunded' });
+    await checkpoint(g);
+    step(1, 'compensated');
+    step(0, 'compensating');
+    await hop(g, event('payment', 'payment.refunded', 'T2-undo', { orderId, refundId: 're_' + hex(6) }, 'comp'), { fromAfter: 'refunded', result: 'order CANCELLED', resultCls: 'bad' });
+    step(0, 'compensated');
+    return finish('ABORTED', `The failure event rippled backwards: <code>inventory.rejected</code> made Payment refund, and <code>payment.refunded</code> made Order cancel. The compensation order is encoded in the bindings, not in any one place.`);
+  }
+  step(2, 'done');
+  step(3, 'active');
+  await hop(g, event('inventory', 'inventory.reserved', 'T3', { orderId, chargeId, sku, qty: 2, address: 'Lindenstr. 12, 10969 Berlin' }),
+    { fromAfter: 'reserved', fromAfterCls: 'ok', result: fail === 'shipping' ? 'no carrier slot' : 'scheduled', resultCls: fail === 'shipping' ? 'bad' : 'ok' });
+  await checkpoint(g);
+  if (fail === 'shipping') {
+    step(3, 'failed');
+    setSaga('COMPENSATING');
+    step(2, 'compensating');
+    await hop(g, event('shipping', 'shipping.failed', 'T4', { orderId, chargeId, sku, qty: 2, reason: 'no_carrier_capacity' }, 'fail'), { fromAfter: 'no carrier slot', fromAfterCls: 'bad', result: 'stock released' });
+    await checkpoint(g);
+    step(2, 'compensated');
+    step(1, 'compensating');
+    await hop(g, event('inventory', 'inventory.released', 'T3-undo', { orderId, chargeId }, 'comp'), { fromAfter: 'stock released', result: 'refunded' });
+    await checkpoint(g);
+    step(1, 'compensated');
+    step(0, 'compensating');
+    await hop(g, event('payment', 'payment.refunded', 'T2-undo', { orderId, refundId: 're_' + hex(6) }, 'comp'), { fromAfter: 'refunded', result: 'order CANCELLED', resultCls: 'bad' });
+    step(0, 'compensated');
+    return finish('ABORTED', `Three compensations, each triggered by the previous one's event. Every event has to carry enough data (chargeId, sku, qty) for the next service to undo its own work.`);
+  }
+  await hop(g, event('shipping', 'shipping.scheduled', 'T4', { orderId, trackingNo: 'DHL' + hex(8).toUpperCase() }), { fromAfter: 'scheduled', fromAfterCls: 'ok', result: 'order CONFIRMED', resultCls: 'ok' });
+  step(3, 'done');
+  return finish('COMPLETED', `Four services, four events, no coordinator. To see where an order is, you read <b>saga.audit</b> or ask every service.`);
+}
+
+function finish(status, html) {
+  setSaga(status);
+  note(html);
+  log(status === 'COMPLETED' ? 'ack' : status === 'STUCK' ? 'warn' : 'saga', 'saga ' + status.toLowerCase(), html);
+}
+
+/* ---------- Controls ---------- */
+function newSaga() {
+  SAGA = { id: 'saga-' + hex(4), orderId: 'ord-' + (1040 + Math.floor(Math.random() * 60)), amount: 129.0, sku: 'SKU-KB-0721', chargeId: 'ch_' + hex(6) };
+}
+function reset() {
+  RUN.gen++;
+  Object.assign(RUN, { playing: false, stepping: false, running: false, done: false, simT: 0, confirmed: false });
+  newSaga();
+  render();
+  renderSteps();
+  $('#sagaStatus').className = 'pill';
+  $('#sagaStatus').textContent = 'NOT STARTED';
+  note('');
+  $('#log').innerHTML = '';
+  $('#props').innerHTML = '<dt>—</dt><dd>Nothing published yet</dd>';
+  $('#body').textContent = '{}';
+  const orch = S.mode === 'orch';
+  $('#stageTitle').textContent = orch ? 'Orchestration topology' : 'Choreography topology';
+  $('#stageDesc').innerHTML = orch
+    ? 'The orchestrator sends commands to <code>saga.commands</code> (direct). Services reply through the default exchange to <code>reply_to</code>; the orchestrator matches replies by <code>correlation_id</code> and decides what runs next.'
+    : 'No coordinator. Services publish domain events to <code>saga.events</code> (topic) and react to whatever their queue is bound to. <code>saga.audit</code> is bound with <code>#</code> and receives a copy of everything.';
+  log('route', 'declare', orch
+    ? 'Declared exchanges <code>saga.commands</code> (direct) and <code>saga.dlx</code> (fanout); durable queues with <code>x-dead-letter-exchange=saga.dlx</code>; prefetch 1 per consumer.'
+    : 'Declared exchanges <code>saga.events</code> (topic) and <code>saga.dlx</code> (fanout); durable queues with <code>x-dead-letter-exchange=saga.dlx</code>; prefetch 1 per consumer.');
+  syncControls();
+}
+function startRun() {
+  if (RUN.running) return;
+  RUN.running = true;
+  const g = RUN.gen;
+  (S.mode === 'orch' ? runOrch : runChoreo)(g).then(() => {
+    if (g !== RUN.gen) return;
+    Object.assign(RUN, { running: false, playing: false, stepping: false, done: true });
+    syncControls();
+  }).catch(e => { if (e !== CANCEL) console.error(e); });
+}
+function play() {
+  if (RUN.done) reset();
+  if (RUN.running && RUN.playing) { RUN.playing = false; syncControls(); return; }
+  RUN.playing = true;
+  startRun();
+  syncControls();
+}
+function stepOnce() {
+  if (RUN.done) reset();
+  RUN.playing = false;
+  RUN.stepping = true;
+  startRun();
+  syncControls();
+}
+function syncControls() {
+  $('#play').textContent = RUN.done ? 'Replay' : RUN.playing ? 'Pause' : RUN.running ? 'Resume' : 'Run';
+  $('#mode-orch').setAttribute('aria-pressed', String(S.mode === 'orch'));
+  $('#mode-choreo').setAttribute('aria-pressed', String(S.mode === 'choreo'));
+}
+function changeAndRun() { reset(); play(); }
+
+$('#play').addEventListener('click', play);
+$('#step').addEventListener('click', stepOnce);
+$('#reset').addEventListener('click', reset);
+$('#mode-orch').addEventListener('click', () => { if (S.mode !== 'orch') { S.mode = 'orch'; changeAndRun(); } });
+$('#mode-choreo').addEventListener('click', () => { if (S.mode !== 'choreo') { S.mode = 'choreo'; changeAndRun(); } });
+$('#outcome').addEventListener('change', e => { S.outcome = e.target.value; changeAndRun(); });
+$('#fault').addEventListener('change', e => { S.fault = e.target.value; changeAndRun(); });
+$('#speed').addEventListener('input', e => { S.speed = +e.target.value; $('#speedOut').textContent = S.speed + '×'; });
+
+S.outcome = $('#outcome').value;
+S.fault = $('#fault').value;
+reset();
+setTimeout(play, 500);
+})();
+</script>

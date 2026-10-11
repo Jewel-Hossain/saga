@@ -1,0 +1,929 @@
+<title>Kafka Saga Simulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: control bar on top, Kafka topology stage beside saga state + consumer groups + record inspector, trace underneath */
+:root {
+  --bg: #EDF0EE; --panel: #FFFFFF; --panel-2: #F5F7F6; --ink: #18211D; --muted: #5B6862;
+  --line: #BFC8C3; --line-2: #DDE3E0; --accent: #D9530A;
+  --k-cmd: #2C5BCB; --k-evt: #D9600E; --k-reply: #0D8576; --k-comp: #A93274; --k-fail: #C42B2B; --k-dead: #6A7074;
+  --ok: #23824F; --bad: #C42B2B; --warn: #A86E12; --on-k: #FFFFFF;
+  --f-display: 'Archivo', 'Arial Narrow', system-ui, sans-serif;
+  --f-body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --f-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0F1311; --panel: #171D1A; --panel-2: #1C2420; --ink: #E4EBE7; --muted: #8F9D96;
+    --line: #3A4741; --line-2: #26302B; --accent: #FF7A33;
+    --k-cmd: #7E9CFF; --k-evt: #FF8A45; --k-reply: #3FC7B1; --k-comp: #E472B4; --k-fail: #FF6B6B; --k-dead: #9AA1A5;
+    --ok: #5CC48C; --bad: #FF6B6B; --warn: #E3B04F; --on-k: #0E1311; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0F1311; --panel: #171D1A; --panel-2: #1C2420; --ink: #E4EBE7; --muted: #8F9D96;
+  --line: #3A4741; --line-2: #26302B; --accent: #FF7A33;
+  --k-cmd: #7E9CFF; --k-evt: #FF8A45; --k-reply: #3FC7B1; --k-comp: #E472B4; --k-fail: #FF6B6B; --k-dead: #9AA1A5;
+  --ok: #5CC48C; --bad: #FF6B6B; --warn: #E3B04F; --on-k: #0E1311; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 14px; line-height: 1.5; }
+.app { max-width: none; margin: 0; padding: 20px clamp(16px, 2vw, 32px) 40px; display: flex; flex-direction: column; gap: 16px; }
+code, .mono { font-family: var(--f-mono); font-size: 0.92em; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 8px 24px; }
+h1 { font-family: var(--f-display); font-weight: 800; font-size: 28px; letter-spacing: -0.01em; margin: 0; line-height: 1.1; text-wrap: balance; }
+h1 span { color: var(--accent); }
+header.top p { margin: 4px 0 0; color: var(--muted); max-width: min(70ch, 100%); }
+@media (min-width: 1700px) { header.top p { max-width: 120ch; } }
+h2 { font-family: var(--f-display); font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; margin: 0; color: var(--muted); }
+.pages { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.pages a { padding: 5px 12px; color: var(--ink); text-decoration: none; font-weight: 500; background: var(--panel-2); }
+.pages a + a { border-left: 1px solid var(--line); }
+.pages a[aria-current="page"] { background: var(--ink); color: var(--bg); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: end; background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 12px 14px; }
+.field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.field > span { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
+select, button { font: inherit; color: var(--ink); }
+select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 0; max-width: 100%; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { background: var(--panel-2); border: 0; padding: 6px 12px; cursor: pointer; font-weight: 500; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.transport { display: flex; gap: 6px; }
+.btn { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px; cursor: pointer; font-weight: 500; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-k); min-width: 84px; }
+.btn:hover { filter: brightness(1.05); }
+button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.speed { display: flex; align-items: center; gap: 8px; }
+.speed input { accent-color: var(--accent); width: 120px; }
+.speed output { font-family: var(--f-mono); font-variant-numeric: tabular-nums; min-width: 3ch; }
+
+.grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+@media (min-width: 1120px) { .grid { grid-template-columns: minmax(0, 1fr) 380px; } .grid .log { grid-column: 1 / -1; } }
+@media (min-width: 1700px) { .grid { grid-template-columns: minmax(0, 1fr) 440px; } #log { max-height: 480px; } }
+.card { background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 14px; min-width: 0; }
+.stage-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; align-items: start; margin-bottom: 8px; }
+.stage-head p { margin: 4px 0 0; color: var(--muted); max-width: 72ch; font-size: 13px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px; }
+.legend span { font-family: var(--f-mono); font-size: 11px; padding: 2px 8px; border-radius: 999px; color: var(--on-k); }
+.svgwrap { overflow-x: auto; container-type: inline-size; }
+#topo { --ar: 0.640; width: 100%; min-width: 760px; height: min(calc(100cqw * var(--ar)), calc(100vh - 360px)); min-height: calc(760px * var(--ar)); display: block; }
+
+/* SVG */
+.edge { fill: none; stroke: var(--line); stroke-width: 1.5; transition: stroke 0.2s; }
+.e-dlt { stroke-dasharray: 6 4; stroke: var(--k-dead); opacity: 0.6; }
+.edge.live { stroke: var(--live); stroke-width: 2.5; opacity: 1; }
+.arrow { fill: var(--line); }
+.box { fill: var(--panel); stroke: var(--ink); stroke-width: 1.4; transition: stroke 0.2s, fill 0.2s; }
+.node .title { font-family: var(--f-display); font-weight: 700; font-size: 15px; fill: var(--ink); }
+.node .sub { font-family: var(--f-mono); font-size: 10.5px; fill: var(--muted); }
+.node .status { font-family: var(--f-body); font-size: 11.5px; fill: var(--muted); font-style: italic; }
+.node.busy .box { stroke: var(--accent); stroke-width: 2.2; }
+.node.busy .status { fill: var(--accent); }
+.node.ok .box { stroke: var(--ok); stroke-width: 2.2; }
+.node.ok .status { fill: var(--ok); font-style: normal; font-weight: 600; }
+.node.bad .box { stroke: var(--bad); stroke-width: 2.2; }
+.node.bad .status { fill: var(--bad); font-style: normal; font-weight: 600; }
+.node.crash .box { stroke: var(--bad); stroke-width: 2.5; fill: var(--panel-2); }
+.node.crash .status { fill: var(--bad); font-style: normal; font-weight: 600; }
+.node.crash { animation: shake 0.4s 2; }
+@keyframes shake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+.topic .tbox { fill: var(--panel); stroke: var(--line); stroke-width: 1.3; }
+.topic.dlt .tbox { stroke: var(--k-dead); stroke-dasharray: 4 3; }
+.topic .name { font-family: var(--f-mono); font-size: 11.5px; font-weight: 500; fill: var(--ink); }
+.topic .meta, .topic .end { font-family: var(--f-mono); font-size: 10px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.topic .plabel { font-family: var(--f-mono); font-size: 9.5px; fill: var(--muted); }
+.topic .plabel.hot { fill: var(--accent); font-weight: 500; }
+.topic .cell { fill: var(--panel-2); stroke: var(--line-2); stroke-width: 1; }
+.topic .cell.old { fill: var(--line); stroke: var(--line); }
+.topic .cell.fresh { animation: fresh 0.9s ease-out; }
+@keyframes fresh { from { transform: translateY(-6px); opacity: 0; } }
+.topic .cell { transform-box: fill-box; }
+.tiny { font-family: var(--f-mono); font-size: 9.5px; fill: var(--muted); }
+.tok rect { stroke: var(--panel); stroke-width: 1.5; }
+.tok text { font-family: var(--f-mono); font-size: 10.5px; font-weight: 500; fill: var(--on-k); }
+.tok.ghost { opacity: 0.4; }
+
+/* Side */
+.side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.saga-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.pill { font-family: var(--f-mono); font-size: 11.5px; font-weight: 500; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.pill.STARTED { border-color: var(--accent); color: var(--accent); }
+.pill.COMPENSATING { border-color: var(--k-comp); color: var(--k-comp); }
+.pill.COMPLETED { background: var(--ok); border-color: var(--ok); color: var(--on-k); }
+.pill.ABORTED { background: var(--k-comp); border-color: var(--k-comp); color: var(--on-k); }
+.pill.STUCK { background: var(--warn); border-color: var(--warn); color: var(--on-k); }
+#steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+#steps li { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 0; border-top: 1px solid var(--line-2); }
+#steps li:first-child { border-top: 0; }
+.tid { font-family: var(--f-display); font-weight: 800; font-size: 15px; color: var(--muted); }
+#steps b { display: block; font-weight: 600; }
+#steps small { display: block; color: var(--muted); font-size: 12px; line-height: 1.35; }
+.chip { font-family: var(--f-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.chip.active { border-color: var(--accent); color: var(--accent); animation: pulse 1.2s infinite; }
+.chip.done { background: var(--ok); border-color: var(--ok); color: var(--on-k); }
+.chip.failed { background: var(--bad); border-color: var(--bad); color: var(--on-k); }
+.chip.compensating { border-color: var(--k-comp); color: var(--k-comp); animation: pulse 1.2s infinite; }
+.chip.compensated { background: var(--k-comp); border-color: var(--k-comp); color: var(--on-k); }
+.chip.stuck { background: var(--warn); border-color: var(--warn); color: var(--on-k); }
+@keyframes pulse { 50% { opacity: 0.45; } }
+#sagaNote { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+#sagaNote:empty { display: none; }
+#sagaNote b { color: var(--ink); }
+.derived { margin: -4px 0 8px; font-size: 12px; color: var(--muted); }
+
+table.groups { width: 100%; border-collapse: collapse; margin-top: 8px; font-family: var(--f-mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+table.groups th { text-align: left; font-weight: 500; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; padding: 4px 6px 4px 0; border-bottom: 1px solid var(--line); }
+table.groups td { padding: 4px 6px 4px 0; border-bottom: 1px solid var(--line-2); overflow-wrap: anywhere; }
+table.groups th:nth-child(n+3), table.groups td:nth-child(n+3) { text-align: right; }
+table.groups td:nth-child(n+3) { white-space: nowrap; }
+table.groups td.lag { color: var(--accent); font-weight: 500; }
+.inspector dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; margin: 10px 0; font-size: 12px; }
+.inspector dt { font-family: var(--f-mono); color: var(--muted); }
+.inspector dd { margin: 0; font-family: var(--f-mono); overflow-wrap: anywhere; }
+.inspector pre { margin: 0; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 6px; padding: 8px 10px; font-family: var(--f-mono); font-size: 11.5px; overflow-x: auto; max-height: 200px; }
+.kdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+
+.log-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.log-head span { font-size: 12px; color: var(--muted); }
+#log { list-style: none; margin: 0; padding: 0; max-height: 340px; overflow-y: auto; font-size: 12.5px; border-top: 1px solid var(--line-2); }
+#log li { display: grid; grid-template-columns: 58px 118px minmax(0, 1fr); gap: 10px; padding: 5px 2px; border-bottom: 1px solid var(--line-2); align-items: baseline; }
+#log .t { font-family: var(--f-mono); color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11.5px; }
+#log .v { font-family: var(--f-mono); font-size: 11px; font-weight: 500; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); justify-self: start; white-space: nowrap; }
+#log .m { min-width: 0; overflow-wrap: anywhere; }
+#log code { background: var(--panel-2); padding: 0 4px; border-radius: 3px; }
+.v.produce { border-color: var(--k-cmd) !important; color: var(--k-cmd); }
+.v.append { color: var(--muted); }
+.v.fetch { border-color: var(--accent) !important; color: var(--accent); }
+.v.commit { background: var(--ok); border-color: var(--ok) !important; color: var(--on-k); }
+.v.crash { background: var(--bad); border-color: var(--bad) !important; color: var(--on-k); }
+.v.rebalance { border-color: var(--warn) !important; color: var(--warn); }
+.v.dlt { background: var(--k-dead); border-color: var(--k-dead) !important; color: var(--on-k); }
+.v.saga { background: var(--ink); border-color: var(--ink) !important; color: var(--bg); }
+.v.warn { background: var(--warn); border-color: var(--warn) !important; color: var(--on-k); }
+@media (max-width: 640px) { #log li { grid-template-columns: 50px minmax(0, 1fr); } #log .m { grid-column: 1 / -1; } }
+
+.glossary { background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 14px; }
+.glossary dl { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: 12px 24px; margin: 12px 0 0; }
+.glossary dt { font-family: var(--f-mono); font-weight: 500; font-size: 12.5px; }
+.glossary dd { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+@media (prefers-reduced-motion: reduce) { .node.crash, .chip.active, .chip.compensating, .topic .cell.fresh { animation: none; } }
+</style>
+
+<div class="app">
+  <header class="top">
+    <div>
+      <h1>Saga over <span>Kafka</span></h1>
+      <p>The same order saga, on a log instead of queues. Records are appended to keyed partitions and never removed on consume; each consumer group just moves its own offset. Break a step to see compensations, or break the consumer side to see rebalances, replays and dead-letter topics.</p>
+    </div>
+    <nav class="pages" aria-label="Simulations"><a href="index.html">← All simulators</a></nav>
+  </header>
+
+  <section class="controls" aria-label="Simulation controls">
+    <div class="field"><span>Coordination</span>
+      <div class="seg" role="group" aria-label="Coordination style">
+        <button id="mode-orch" type="button" aria-pressed="true">Orchestration</button>
+        <button id="mode-choreo" type="button" aria-pressed="false">Choreography</button>
+      </div>
+    </div>
+    <label class="field" for="outcome"><span>Business outcome</span>
+      <select id="outcome">
+        <option value="none">All steps succeed</option>
+        <option value="payment">Payment: card declined (T2)</option>
+        <option value="inventory" selected>Inventory: out of stock (T3)</option>
+        <option value="shipping">Shipping: no carrier slot (T4)</option>
+      </select>
+    </label>
+    <label class="field" for="fault"><span>Kafka fault</span>
+      <select id="fault">
+        <option value="none" selected>None</option>
+        <option value="crash">Payment consumer dies before committing its offset</option>
+        <option value="poison">Inventory reads a poison record</option>
+        <option value="dup">Producer retries after a lost ack (idempotence off)</option>
+      </select>
+    </label>
+    <div class="field"><span>Playback</span>
+      <div class="transport">
+        <button id="play" class="btn primary" type="button">Run</button>
+        <button id="step" class="btn" type="button" title="Run until the next record settles">Step</button>
+        <button id="reset" class="btn" type="button">Reset</button>
+      </div>
+    </div>
+    <div class="field"><span>Speed</span>
+      <div class="speed"><input id="speed" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Animation speed"><output id="speedOut">1×</output></div>
+    </div>
+  </section>
+
+  <main class="grid">
+    <section class="card stage">
+      <div class="stage-head">
+        <div>
+          <h2 id="stageTitle">Topology</h2>
+          <p id="stageDesc"></p>
+        </div>
+        <div class="legend" aria-label="Record colours">
+          <span style="background:var(--k-cmd)">command</span>
+          <span style="background:var(--k-evt)">event</span>
+          <span style="background:var(--k-reply)">reply</span>
+          <span style="background:var(--k-fail)">failure</span>
+          <span style="background:var(--k-comp)">compensation</span>
+          <span style="background:var(--k-dead)">dead-lettered</span>
+        </div>
+      </div>
+      <div class="svgwrap"><svg id="topo" viewBox="0 0 1000 640" role="img" aria-label="Kafka topology: services, topics with partitions, and consumer groups"></svg></div>
+    </section>
+
+    <aside class="side">
+      <section class="card saga">
+        <div class="saga-head"><h2>Saga state</h2><span id="sagaStatus" class="pill">NOT STARTED</span></div>
+        <p class="derived" id="sagaDerived"></p>
+        <ol id="steps"></ol>
+        <p id="sagaNote"></p>
+      </section>
+      <section class="card">
+        <h2>Consumer groups</h2>
+        <table class="groups"><thead><tr><th>group</th><th>partition</th><th>committed</th><th>end</th><th>lag</th></tr></thead><tbody id="groups"></tbody></table>
+      </section>
+      <section class="card inspector">
+        <h2>Last record</h2>
+        <dl id="props"><dt>—</dt><dd>Nothing produced yet</dd></dl>
+        <pre id="body">{}</pre>
+      </section>
+    </aside>
+
+    <section class="card log">
+      <div class="log-head"><h2>Cluster trace</h2><span>Produce, Fetch and OffsetCommit requests as the brokers see them</span></div>
+      <ol id="log"></ol>
+    </section>
+  </main>
+
+  <section class="glossary">
+    <h2>Kafka terms used here</h2>
+    <dl>
+      <div><dt>Topic · partition</dt><dd>A topic is split into partitions, each an append-only log. Records get increasing offsets and stay there until retention removes them, whether or not anyone has read them.</dd></div>
+      <div><dt>Record key</dt><dd>The producer hashes the key to pick a partition. Every record here is keyed by order id, so all of one saga's records land in the same partition and are read in order.</dd></div>
+      <div><dt>Consumer group · offset</dt><dd>Each group reads the whole topic independently and stores how far it got as a committed offset. Lag is log end minus committed offset.</dd></div>
+      <div><dt>OffsetCommit</dt><dd>The consumer's equivalent of an ack, but for a position, not a message. Committing after processing gives at-least-once delivery.</dd></div>
+      <div><dt>Rebalance</dt><dd>When a consumer stops heartbeating for <code>session.timeout.ms</code>, the group coordinator reassigns its partitions. The new owner starts at the last committed offset and rereads anything processed but not committed.</dd></div>
+      <div><dt>Idempotent producer</dt><dd><code>enable.idempotence=true</code> gives the producer an id and per-partition sequence numbers, so the broker drops a retried batch it has already written. With it off, a lost ack means a duplicate record.</dd></div>
+      <div><dt>Dead letter topic (DLT)</dt><dd>Kafka has no nack or DLX. A consumer that can't process a record writes it to a <code>.DLT</code> topic itself and commits past it, otherwise the whole partition is stuck behind it.</dd></div>
+      <div><dt>No broker-side routing</dt><dd>Unlike a RabbitMQ exchange, Kafka doesn't filter. In choreography every group reads every event on <code>saga.events</code> and ignores the types it doesn't care about.</dd></div>
+      <div><dt>Replay</dt><dd>Because records stay in the log, a new or reset consumer group can rebuild state from offset 0. That's how <code>saga-audit</code> reconstructs saga status without a saga table.</dd></div>
+    </dl>
+  </section>
+</div>
+
+<script>
+(() => {
+const NS = 'http://www.w3.org/2000/svg';
+const $ = s => document.querySelector(s);
+const Y = { payment: 140, inventory: 310, shipping: 480 };
+const C = 310;
+const SVCS = ['payment', 'inventory', 'shipping'];
+const NAME = { orch: 'Orchestrator', order: 'Order service', payment: 'Payment', inventory: 'Inventory', shipping: 'Shipping', audit: 'Saga audit' };
+const CG = { orch: 'order-saga', order: 'order-svc', payment: 'payment-svc', inventory: 'inventory-svc', shipping: 'shipping-svc', audit: 'saga-audit' };
+const EVT_TO = {
+  'order.created': 'payment', 'payment.charged': 'inventory', 'payment.declined': 'order',
+  'inventory.reserved': 'shipping', 'inventory.rejected': 'payment', 'inventory.released': 'payment',
+  'shipping.scheduled': 'order', 'shipping.failed': 'inventory', 'payment.refunded': 'order',
+};
+
+const S = { mode: 'orch', outcome: 'inventory', fault: 'none', speed: 1 };
+const RUN = { gen: 0, playing: false, stepping: false, running: false, done: false, simT: 0, explainedFanout: false };
+const CANCEL = Symbol('cancel');
+let TOPO, TOKLAYER, SAGA, HOT = 0, PATH = {}, NODE = {}, TOPIC = {}, GROUP = {};
+
+const hex = n => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function txt(parent, x, y, s, cls, anchor = 'middle') {
+  const t = el('text', { x, y, class: cls, 'text-anchor': anchor }, parent);
+  t.textContent = s;
+  return t;
+}
+
+/* ---------- Topology ---------- */
+function topology(mode) {
+  const orch = mode === 'orch';
+  const origin = orch ? { id: 'orch', title: 'Orchestrator', sub: 'group order-saga' }
+                      : { id: 'order', title: 'Order service', sub: 'group order-svc' };
+  const nodes = [{ ...origin, x: 120, y: C, w: 170, h: 96 },
+    ...SVCS.map(s => ({ id: s, title: NAME[s], sub: 'group ' + CG[s], x: 880, y: Y[s], w: 140, h: 76 }))];
+  const dlt = orch ? 'inventory.commands.DLT' : 'saga.events.DLT';
+  const topics = orch
+    ? [...SVCS.map(s => ({ id: `${s}.commands`, x: 430, y: Y[s] })), { id: 'saga.replies', x: 430, y: 590 }]
+    : [{ id: 'saga.events', x: 430, y: C }];
+  topics.push({ id: dlt, x: 680, y: 50, dlt: true });
+  const paths = {};
+  if (orch) {
+    for (const s of SVCS) {
+      const y = Y[s];
+      paths[`pub:orch:${s}.commands`] = y === C ? `M205 ${C} H323` : `M205 ${y < C ? 296 : 324} C 270 ${y < C ? 296 : 324}, 260 ${y}, 323 ${y}`;
+      paths[`c:${s}.commands:${s}`] = `M537 ${y} H808`;
+      paths[`pub:${s}:saga.replies`] = `M950 ${y} H978 V590 H537`;
+    }
+    paths['c:saga.replies:orch'] = `M323 590 H120 V360`;
+  } else {
+    nodes.push({ id: 'audit', title: 'Saga audit', sub: 'group saga-audit', x: 120, y: 520, w: 150, h: 70 });
+    paths['pub:order:saga.events'] = `M205 296 H323`;
+    paths['c:saga.events:order'] = `M323 316 H207`;
+    paths['c:saga.events:audit'] = `M323 334 C 270 340, 250 520, 197 520`;
+    for (const s of SVCS) {
+      const y = Y[s];
+      paths[`c:saga.events:${s}`] = y === C ? `M537 ${C} H808` : `M537 ${C} C 680 ${C}, 660 ${y}, 808 ${y}`;
+      paths[`pub:${s}:saga.events`] = `M950 ${y} H978 V610 H520 V342`;
+    }
+  }
+  paths.dlt = `M950 ${Y.inventory - 10} H965 V50 H787`;
+  const groups = orch
+    ? { payment: 'payment.commands', inventory: 'inventory.commands', shipping: 'shipping.commands', orch: 'saga.replies' }
+    : { order: 'saga.events', payment: 'saga.events', inventory: 'saga.events', shipping: 'saga.events', audit: 'saga.events' };
+  return { orch, origin: origin.id, nodes, topics, paths, groups, dlt };
+}
+
+function render() {
+  TOPO = topology(S.mode);
+  const svg = $('#topo');
+  svg.innerHTML = '';
+  PATH = {}; NODE = {}; TOPIC = {}; GROUP = {};
+  const defs = el('defs', {}, svg);
+  const mk = el('marker', { id: 'arr', viewBox: '0 0 8 8', refX: 7, refY: 4, markerWidth: 6, markerHeight: 6, orient: 'auto' }, defs);
+  el('path', { d: 'M0 0 L8 4 L0 8 z', class: 'arrow' }, mk);
+  const gE = el('g', {}, svg), gN = el('g', {}, svg);
+  TOKLAYER = el('g', {}, svg);
+
+  for (const [id, d] of Object.entries(TOPO.paths)) PATH[id] = el('path', { d, class: 'edge' + (id === 'dlt' ? ' e-dlt' : ''), 'marker-end': 'url(#arr)' }, gE);
+  txt(gE, 972, 30, 'to DLT', 'tiny', 'end');
+
+  for (const n of TOPO.nodes) {
+    const g = el('g', { class: 'node' }, gN);
+    el('rect', { x: n.x - n.w / 2, y: n.y - n.h / 2, width: n.w, height: n.h, rx: 10, class: 'box' }, g);
+    const big = n.h > 80;
+    txt(g, n.x, n.y - (big ? 16 : 10), n.title, 'title');
+    txt(g, n.x, n.y + (big ? 2 : 6), n.sub, 'sub');
+    const st = txt(g, n.x, n.y + (big ? 26 : 24), 'idle', 'status');
+    NODE[n.id] = { g, st };
+  }
+  for (const t of TOPO.topics) {
+    const g = el('g', { class: 'topic' + (t.dlt ? ' dlt' : '') }, gN);
+    el('rect', { x: t.x - 105, y: t.y - 30, width: 210, height: 60, rx: 5, class: 'tbox' }, g);
+    txt(g, t.x - 105, t.y - 38, t.id, 'name', 'start');
+    if (!t.dlt) txt(g, t.x + 105, t.y - 38, '3 partitions', 'meta', 'end');
+    const parts = [], rows = [];
+    for (let p = 0; p < 3; p++) {
+      const ry = t.y - 18 + p * 18;
+      txt(g, t.x - 97, ry + 4, 'p' + p, 'plabel' + (p === HOT ? ' hot' : ''), 'start');
+      const cells = [];
+      for (let i = 0; i < 10; i++) cells.push(el('rect', { x: t.x - 76 + i * 17, y: ry - 6, width: 15, height: 12, rx: 2, class: 'cell' }, g));
+      rows.push(cells);
+      const n = t.dlt ? (p === HOT ? 1 : 0) : 3 + Math.floor(Math.random() * 5);
+      parts.push({ base: t.dlt ? 0 : 1000 + Math.floor(Math.random() * 8000), recs: Array.from({ length: n }, () => ({ kind: 'old' })) });
+    }
+    const end = t.dlt ? null : txt(g, t.x - 105, t.y + 44, '', 'end', 'start');
+    TOPIC[t.id] = { ...t, g, parts, rows, end };
+    drawTopic(t.id);
+  }
+  for (const [owner, topic] of Object.entries(TOPO.groups)) GROUP[owner] = { topic, committed: endOf(topic) };
+  renderGroups();
+}
+
+const endOf = id => { const p = TOPIC[id].parts[HOT]; return p.base + p.recs.length; };
+function drawTopic(id, fresh = false) {
+  const t = TOPIC[id];
+  t.parts.forEach((part, p) => {
+    const recs = part.recs.slice(-10);
+    t.rows[p].forEach((c, i) => {
+      const r = recs[i];
+      c.setAttribute('class', 'cell' + (r ? (r.kind === 'old' ? ' old' : '') : '') + (fresh && p === HOT && i === recs.length - 1 ? ' fresh' : ''));
+      c.setAttribute('style', r && r.kind !== 'old' ? `fill:var(--k-${r.kind});stroke:var(--k-${r.kind})` : '');
+    });
+  });
+  if (t.end) t.end.textContent = `p${HOT} log end offset ${endOf(id)}`;
+}
+function append(m) {
+  const t = TOPIC[m.topic];
+  const part = t.parts[HOT];
+  part.recs.push({ kind: m.kind });
+  drawTopic(m.topic, true);
+  renderGroups();
+  return { ...m, partition: HOT, offset: endOf(m.topic) - 1, ts: Date.now() };
+}
+function renderGroups() {
+  $('#groups').innerHTML = Object.entries(GROUP).map(([owner, gr]) => {
+    const end = endOf(gr.topic), lag = end - gr.committed;
+    return `<tr><td>${CG[owner]}</td><td>${gr.topic}-${HOT}</td><td>${gr.committed}</td><td>${end}</td><td class="${lag ? 'lag' : ''}">${lag}</td></tr>`;
+  }).join('');
+}
+function commit(owner, offset) { GROUP[owner].committed = offset + 1; renderGroups(); }
+
+function setNode(id, text, cls = '') {
+  const n = NODE[id]; if (!n) return;
+  n.g.setAttribute('class', 'node' + (cls ? ' ' + cls : ''));
+  if (text != null) n.st.textContent = text;
+}
+
+/* ---------- Timing ---------- */
+const active = () => RUN.playing || RUN.stepping;
+(function clock() {
+  let last = performance.now();
+  (function tick(now) {
+    const dt = Math.min(64, now - last); last = now;
+    if (active()) RUN.simT += dt * S.speed;
+    requestAnimationFrame(tick);
+  })(last);
+})();
+function sleep(g, ms) {
+  return new Promise((res, rej) => {
+    let t = 0, last = performance.now();
+    (function tick(now) {
+      if (g !== RUN.gen) return rej(CANCEL);
+      const dt = Math.min(64, now - last); last = now;
+      if (active()) t += dt * S.speed;
+      if (t >= ms) res(); else requestAnimationFrame(tick);
+    })(last);
+  });
+}
+async function checkpoint(g) {
+  if (RUN.stepping) { RUN.stepping = false; syncControls(); }
+  while (!active()) { await new Promise(r => requestAnimationFrame(r)); if (g !== RUN.gen) throw CANCEL; }
+}
+function makeToken(label, kind, ghost = false) {
+  const g = el('g', { class: 'tok' + (ghost ? ' ghost' : ''), visibility: 'hidden' }, TOKLAYER);
+  const w = label.length * 6.4 + 18;
+  const rect = el('rect', { x: -w / 2, y: -10, width: w, height: 20, rx: 10 }, g);
+  txt(g, 0, 4, label, '');
+  const tok = { el: g, color: '', setKind(k) { this.color = `var(--k-${k})`; rect.setAttribute('style', `fill:${this.color}`); } };
+  tok.setKind(kind);
+  return tok;
+}
+function travel(g, tok, id, reverse = false) {
+  const p = PATH[id];
+  if (!p) { console.warn('missing path', id); return Promise.resolve(); }
+  const len = p.getTotalLength();
+  p.style.setProperty('--live', tok.color);
+  p.classList.add('live');
+  const place = d => { const pt = p.getPointAtLength(reverse ? len - d : d); tok.el.setAttribute('transform', `translate(${pt.x},${pt.y})`); };
+  place(0); tok.el.setAttribute('visibility', 'visible');
+  return new Promise((res, rej) => {
+    let d = 0, last = performance.now();
+    (function tick(now) {
+      if (g !== RUN.gen) return rej(CANCEL);
+      const dt = Math.min(64, now - last); last = now;
+      if (active()) d += dt * 0.34 * S.speed;
+      place(Math.min(d, len));
+      if (d >= len) { p.classList.remove('live'); res(); } else requestAnimationFrame(tick);
+    })(last);
+  });
+}
+
+/* ---------- Panels ---------- */
+const STEP_DEFS = {
+  orch: [
+    { name: 'Create order', where: 'orchestrator, local transaction', comp: 'cancel order (local)' },
+    { name: 'Charge card', where: 'payment.charge → payment.commands', comp: 'payment.refund' },
+    { name: 'Reserve stock', where: 'inventory.reserve → inventory.commands', comp: 'inventory.release' },
+    { name: 'Schedule shipment', where: 'shipping.schedule → shipping.commands', comp: 'none, last step' },
+  ],
+  choreo: [
+    { name: 'Create order', where: 'order-svc emits order.created', comp: 'cancel on payment.declined / payment.refunded' },
+    { name: 'Charge card', where: 'payment-svc emits payment.charged', comp: 'refund on inventory.rejected / inventory.released' },
+    { name: 'Reserve stock', where: 'inventory-svc emits inventory.reserved', comp: 'release on shipping.failed' },
+    { name: 'Schedule shipment', where: 'shipping-svc emits shipping.scheduled', comp: 'none, last step' },
+  ],
+};
+const STEP_STATE = [];
+function renderSteps() {
+  const ol = $('#steps'); ol.innerHTML = '';
+  STEP_DEFS[S.mode].forEach((s, i) => {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="tid">T${i + 1}</span><div><b>${s.name}</b><small>${s.where}<br>↺ ${s.comp}</small></div><span class="chip">pending</span>`;
+    ol.appendChild(li);
+    STEP_STATE[i] = li.querySelector('.chip');
+  });
+  $('#sagaDerived').textContent = S.mode === 'orch'
+    ? 'Stored in the orchestrator\'s saga table, keyed by saga id.'
+    : 'No saga table. This view is the saga-audit group\'s projection of saga.events, and it can be rebuilt any time by resetting that group to offset 0.';
+}
+function step(i, status) { const c = STEP_STATE[i]; c.className = 'chip ' + status; c.textContent = status; }
+function setSaga(s) { const p = $('#sagaStatus'); p.className = 'pill ' + s; p.textContent = s; }
+function note(html) { $('#sagaNote').innerHTML = html; }
+
+function log(cls, verb, html) {
+  const li = document.createElement('li');
+  li.innerHTML = `<span class="t">${(RUN.simT / 1000).toFixed(1)}s</span><span class="v ${cls}">${verb}</span><span class="m">${html}</span>`;
+  const ol = $('#log');
+  ol.appendChild(li);
+  ol.scrollTop = ol.scrollHeight;
+}
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const tp = r => `${r.topic}-${r.partition}`;
+function inspect(r) {
+  const rows = [
+    ['topic', r.topic], ['partition', `${r.partition}  (hash(key) % 3)`], ['offset', String(r.offset)],
+    ['key', r.key], ['timestamp', `CreateTime ${new Date(r.ts).toISOString().slice(11, 23)}`],
+  ];
+  for (const [k, v] of Object.entries(r.headers)) rows.push([`header ${k}`, v]);
+  $('#props').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${k === 'topic' ? `<span class="kdot" style="background:var(--k-${r.kind})"></span>` : ''}${esc(v)}</dd>`).join('');
+  $('#body').textContent = JSON.stringify(r.value, null, 2);
+}
+
+/* ---------- One record: produce → append → fetch by every subscribed group → commit ---------- */
+async function produce(g, m, o) {
+  setNode(m.from, 'producing ' + m.type, 'busy');
+  log('produce', 'Produce', `<b>${NAME[m.from]}</b> → <code>${m.topic}</code> · key <code>${m.key}</code> → partition ${HOT} · <code>acks=all</code>`);
+  const tok = makeToken(m.type, m.kind);
+  const path = `pub:${m.from}:${m.topic}`;
+  await travel(g, tok, path);
+  const recs = [append(m)];
+  inspect(recs[0]);
+  log('append', 'append', `Leader for <code>${tp(recs[0])}</code> appends the record at offset <b>${recs[0].offset}</b> and replicates it to the in-sync replicas.`);
+  if (o.dup) {
+    tok.setKind('fail');
+    log('warn', 'ack lost', `The produce response is lost on the way back. The producer can't tell whether the write happened, so it retries.`);
+    await travel(g, tok, path, true);
+    tok.setKind(m.kind);
+    log('produce', 'Produce', `Retry of the same batch. <code>enable.idempotence=false</code>, so there is no producer id or sequence number for the broker to dedupe on.`);
+    await travel(g, tok, path);
+    recs.push(append(m));
+    inspect(recs[1]);
+    log('warn', 'duplicate', `The same record is appended again at offset <b>${recs[1].offset}</b>. Every consumer group will read it twice.`);
+  }
+  tok.el.remove();
+  setNode(m.from, o.fromAfter || 'idle', o.fromAfterCls || '');
+  return recs;
+}
+
+async function consumeOne(g, r, owner, o, isDup) {
+  const main = owner === r.to, audit = owner === 'audit';
+  if (owner === r.from) { commit(owner, r.offset); return null; }
+  const path = `c:${r.topic}:${owner}`;
+  if (!main && !audit) {
+    const tok = makeToken(r.type, r.kind, true);
+    await travel(g, tok, path);
+    tok.el.remove();
+    commit(owner, r.offset);
+    return null;
+  }
+  const tok = makeToken(r.type, r.kind);
+  if (main) log('fetch', 'Fetch', `<b>${CG[owner]}</b> fetches <code>${tp(r)}</code> from offset ${r.offset}${isDup ? ' (the duplicate)' : ''}.`);
+  await travel(g, tok, path);
+  if (audit) {
+    tok.el.remove();
+    setNode('audit', isDup ? `skipped duplicate @${r.offset}` : `projected ${r.type}`, 'busy');
+    await sleep(g, 300);
+    commit(owner, r.offset);
+    setNode('audit', `saga view @${r.offset}`, '');
+    return null;
+  }
+  const idem = r.headers['idempotency-key'];
+  if (isDup) {
+    setNode(owner, 'checking key…', 'busy');
+    await sleep(g, 500);
+    log('saga', 'idempotency', `${CG[owner]} finds <code>${idem}</code> already processed and skips offset ${r.offset}. Without that check the card would be charged twice.`);
+    tok.el.remove();
+    commit(owner, r.offset);
+    log('commit', 'OffsetCommit', `${CG[owner]} commits offset ${r.offset + 1} for <code>${tp(r)}</code>.`);
+    setNode(owner, 'duplicate skipped', 'ok');
+    return 'dup';
+  }
+  if (o.poison) {
+    setNode(owner, 'cannot deserialize', 'bad');
+    await sleep(g, 500);
+    log('dlt', 'poison', `${CG[owner]} can't deserialize offset ${r.offset} (<code>qty</code> is "two"). Kafka has no per-record reject: the partition only moves on when the group commits past it, so retrying here would block every later record on <code>${tp(r)}</code>.`);
+    tok.setKind('dead');
+    const dead = { ...r, topic: TOPO.dlt, kind: 'dead', headers: { ...r.headers, 'dlt.original.topic': r.topic, 'dlt.original.offset': String(r.offset), 'dlt.exception': 'JsonMappingException: qty' } };
+    await travel(g, tok, 'dlt');
+    const dr = append(dead);
+    inspect(dr);
+    tok.el.remove();
+    log('dlt', 'Produce', `${CG[owner]} writes the record to <code>${TOPO.dlt}</code> with <code>dlt.*</code> headers recording where it came from and why it failed.`);
+    commit(owner, r.offset);
+    log('commit', 'OffsetCommit', `${CG[owner]} commits offset ${r.offset + 1} to unblock the partition. Nobody consumes the DLT until someone looks at it.`);
+    setNode(owner, 'idle', '');
+    return 'dead';
+  }
+  if (o.crash) {
+    setNode(owner, 'processing…', 'busy');
+    await sleep(g, 700);
+    log('saga', 'side effect', `${CG[owner]} ${o.crash} and stores the result under <code>${idem}</code>.`);
+    await sleep(g, 300);
+    tok.el.remove();
+    setNode(owner, 'process killed', 'crash');
+    log('crash', 'crash', `${CG[owner]}-1 dies before <code>OffsetCommit</code>. Group <code>${CG[owner]}</code> still has committed offset ${GROUP[owner].committed} for <code>${tp(r)}</code>, which points at this record.`);
+    for (let s = 3; s > 0; s--) { setNode(owner, `heartbeat missed · ${s}`, 'crash'); await sleep(g, 450); }
+    log('rebalance', 'rebalance', `After <code>session.timeout.ms</code> the group coordinator drops ${CG[owner]}-1 and rebalances. <code>${tp(r)}</code> is assigned to ${CG[owner]}-2, which resumes from the committed offset.`);
+    setNode(owner, `${CG[owner]}-2 · fetching`, 'busy');
+    log('fetch', 'Fetch', `<b>${CG[owner]}-2</b> fetches <code>${tp(r)}</code> from offset ${r.offset} again.`);
+    const t2 = makeToken(r.type, r.kind);
+    await travel(g, t2, path);
+    t2.el.remove();
+    log('saga', 'idempotency', `At-least-once: the record is processed a second time. ${CG[owner]}-2 finds <code>${idem}</code> already stored and reuses the result, so the card is not charged twice.`);
+  }
+  setNode(owner, 'processing…', 'busy');
+  await sleep(g, 650);
+  tok.el.remove();
+  commit(owner, r.offset);
+  log('commit', 'OffsetCommit', `${CG[owner]} commits offset ${r.offset + 1} for <code>${tp(r)}</code>. The record stays in the log.`);
+  setNode(owner, o.result || 'idle', o.resultCls || '');
+  return 'ok';
+}
+
+async function hop(g, m, o = {}) {
+  m.key = SAGA.orderId;
+  const recs = await produce(g, m, o);
+  await sleep(g, 250);
+  const owners = Object.keys(GROUP).filter(k => GROUP[k].topic === m.topic);
+  if (!TOPO.orch) {
+    const others = owners.filter(k => k !== m.to && k !== 'audit' && k !== m.from).map(k => CG[k]);
+    if (!RUN.explainedFanout) {
+      RUN.explainedFanout = true;
+      log('append', 'fan-out', `All five groups read <code>saga.events</code> independently. Kafka does no routing, so ${others.join(', ')} fetch this record too and skip it by <code>event-type</code>.`);
+    }
+  }
+  let result = 'ok';
+  for (let i = 0; i < recs.length; i++) {
+    const res = await Promise.all(owners.map(k => consumeOne(g, recs[i], k, i === 0 ? o : {}, i > 0)));
+    if (i === 0) result = res.find(x => x) || 'ok';
+  }
+  return result;
+}
+
+/* ---------- Record builders ---------- */
+function command(type, stepId, body, comp = false) {
+  const svc = type.split('.')[0];
+  return { from: 'orch', topic: `${svc}.commands`, type, to: svc, kind: comp ? 'comp' : 'cmd',
+    headers: { 'saga-id': SAGA.id, 'saga-step': stepId, 'command-type': type, 'reply-topic': 'saga.replies', 'idempotency-key': `${SAGA.id}:${type}` }, value: body };
+}
+function reply(from, type, stepId, body, kind = 'reply') {
+  return { from, topic: 'saga.replies', type, to: 'orch', kind,
+    headers: { 'saga-id': SAGA.id, 'saga-step': stepId, 'reply-type': type, 'idempotency-key': `${SAGA.id}:${type}` }, value: body };
+}
+function event(from, type, stepId, body, kind = 'evt') {
+  return { from, topic: 'saga.events', type, to: EVT_TO[type], kind,
+    headers: { 'saga-id': SAGA.id, 'saga-step': stepId, 'event-type': type, 'idempotency-key': `${SAGA.id}:${type}` }, value: body };
+}
+
+/* ---------- Orchestration ---------- */
+async function runOrch(g) {
+  const fail = S.outcome, fault = S.fault;
+  const { id, orderId, amount, sku, chargeId } = SAGA;
+  setSaga('STARTED');
+  step(0, 'active');
+  setNode('orch', 'BEGIN; INSERT saga, order', 'busy');
+  log('saga', 'local tx', `Orchestrator inserts saga <b>${id}</b> (STARTED) and order <b>${orderId}</b> (PENDING), plus the first command in its outbox, in one DB transaction. Key <code>${orderId}</code> hashes to partition ${HOT} on every topic.`);
+  await sleep(g, 900);
+  step(0, 'done');
+  setNode('orch', 'idle');
+  await checkpoint(g);
+
+  step(1, 'active');
+  await hop(g, command('payment.charge', 'T2', { orderId, amount, currency: 'EUR', card: 'tok_visa_4242' }),
+    { fromAfter: 'awaiting reply', crash: fault === 'crash' ? `charges ${amount} EUR (${chargeId})` : null, dup: fault === 'dup',
+      result: fail === 'payment' ? 'card declined' : 'charged', resultCls: fail === 'payment' ? 'bad' : 'ok' });
+  await checkpoint(g);
+  if (fail === 'payment') {
+    await hop(g, reply('payment', 'payment.declined', 'T2', { orderId, reason: 'card_declined' }, 'fail'), { result: 'card declined', resultCls: 'bad' });
+    step(1, 'failed');
+    setSaga('COMPENSATING');
+    await checkpoint(g);
+    await localCancel(g);
+    return finish('ABORTED', `Payment was the first remote step, so the only thing to undo is the orchestrator's own order row. No refund needed because nothing was charged.`);
+  }
+  await hop(g, reply('payment', 'payment.charged', 'T2', { orderId, chargeId }), { result: 'saga updated' });
+  step(1, 'done');
+  await checkpoint(g);
+
+  step(2, 'active');
+  const r = await hop(g, command('inventory.reserve', 'T3', { orderId, sku, qty: fault === 'poison' ? 'two' : 2 }),
+    { fromAfter: 'awaiting reply', poison: fault === 'poison',
+      result: fail === 'inventory' ? 'out of stock' : 'reserved', resultCls: fail === 'inventory' ? 'bad' : 'ok' });
+  await checkpoint(g);
+  if (r === 'dead') {
+    for (let s = 30; s >= 0; s -= 2) { setNode('orch', `awaiting reply · ${s}s left`, 'busy'); await sleep(g, 110); }
+    log('warn', 'deadline', `No reply for saga <code>${id}</code> arrived on <code>saga.replies</code> within the 30 s step deadline. The orchestrator owns the saga, so it gives up on T3 and compensates.`);
+    setNode('orch', 'compensating', 'bad');
+    step(2, 'failed');
+    setSaga('COMPENSATING');
+    await checkpoint(g);
+    await compPayment(g);
+    await localCancel(g);
+    return finish('ABORTED', `The poison record sits in <b>inventory.commands.DLT</b>, but the saga still finished cleanly because the orchestrator ran a timer on the step. Records behind it on the partition kept flowing because the consumer committed past it.`);
+  }
+  if (fail === 'inventory') {
+    await hop(g, reply('inventory', 'inventory.rejected', 'T3', { orderId, sku, available: 0 }, 'fail'), { result: 'compensating', resultCls: 'bad' });
+    step(2, 'failed');
+    setSaga('COMPENSATING');
+    await checkpoint(g);
+    await compPayment(g);
+    await localCancel(g);
+    return finish('ABORTED', `T3 failed, so the orchestrator walked back through the completed steps in reverse: refund T2, then cancel T1. Every undo is a new record appended to the log, not a deletion.`);
+  }
+  await hop(g, reply('inventory', 'inventory.reserved', 'T3', { orderId, sku, reservationId: 'rsv_' + hex(5) }), { result: 'saga updated' });
+  step(2, 'done');
+  await checkpoint(g);
+
+  step(3, 'active');
+  await hop(g, command('shipping.schedule', 'T4', { orderId, address: 'Lindenstr. 12, 10969 Berlin', parcels: 1 }),
+    { fromAfter: 'awaiting reply', result: fail === 'shipping' ? 'no carrier slot' : 'scheduled', resultCls: fail === 'shipping' ? 'bad' : 'ok' });
+  await checkpoint(g);
+  if (fail === 'shipping') {
+    await hop(g, reply('shipping', 'shipping.failed', 'T4', { orderId, reason: 'no_carrier_capacity' }, 'fail'), { result: 'compensating', resultCls: 'bad' });
+    step(3, 'failed');
+    setSaga('COMPENSATING');
+    await checkpoint(g);
+    step(2, 'compensating');
+    await hop(g, command('inventory.release', 'T3-undo', { orderId, sku, qty: 2 }, true), { fromAfter: 'awaiting reply', result: 'stock released' });
+    await checkpoint(g);
+    await hop(g, reply('inventory', 'inventory.released', 'T3-undo', { orderId }, 'comp'), { result: 'saga updated' });
+    step(2, 'compensated');
+    await checkpoint(g);
+    await compPayment(g);
+    await localCancel(g);
+    return finish('ABORTED', `The last step failed, so all three earlier steps were compensated in reverse order: release stock, refund card, cancel order.`);
+  }
+  await hop(g, reply('shipping', 'shipping.scheduled', 'T4', { orderId, trackingNo: 'DHL' + hex(8).toUpperCase() }), { result: 'saga updated' });
+  step(3, 'done');
+  setNode('orch', 'saga COMPLETED', 'ok');
+  log('saga', 'local tx', `Orchestrator marks saga <b>${id}</b> COMPLETED and order <b>${orderId}</b> CONFIRMED.`);
+  return finish('COMPLETED', `Four local transactions, chained by command and reply records. Every record is still in the log, so the whole saga can be replayed or audited later.`);
+}
+async function compPayment(g) {
+  step(1, 'compensating');
+  await hop(g, command('payment.refund', 'T2-undo', { orderId: SAGA.orderId, chargeId: SAGA.chargeId, amount: SAGA.amount }, true), { fromAfter: 'awaiting reply', result: 'refunded' });
+  await checkpoint(g);
+  await hop(g, reply('payment', 'payment.refunded', 'T2-undo', { orderId: SAGA.orderId, refundId: 're_' + hex(6) }, 'comp'), { result: 'saga updated' });
+  step(1, 'compensated');
+  await checkpoint(g);
+}
+async function localCancel(g) {
+  step(0, 'compensating');
+  setNode('orch', 'UPDATE order CANCELLED', 'busy');
+  log('saga', 'local tx', `Orchestrator sets order <b>${SAGA.orderId}</b> to CANCELLED and saga <b>${SAGA.id}</b> to ABORTED.`);
+  await sleep(g, 800);
+  step(0, 'compensated');
+  setNode('orch', 'saga ABORTED', 'bad');
+}
+
+/* ---------- Choreography ---------- */
+async function runChoreo(g) {
+  const fail = S.outcome, fault = S.fault;
+  const { orderId, amount, sku, chargeId } = SAGA;
+  setSaga('STARTED');
+  step(0, 'active');
+  setNode('order', 'BEGIN; INSERT order + outbox', 'busy');
+  log('saga', 'local tx', `Order service writes order <b>${orderId}</b> (PENDING) and an <code>order.created</code> outbox row in one transaction. Key <code>${orderId}</code> hashes to partition ${HOT}, so every event for this order is read in order.`);
+  await sleep(g, 900);
+  step(0, 'done');
+  await checkpoint(g);
+
+  step(1, 'active');
+  await hop(g, event('order', 'order.created', 'T1', { orderId, amount, currency: 'EUR', items: [{ sku, qty: 2 }] }),
+    { fromAfter: 'PENDING', crash: fault === 'crash' ? `charges ${amount} EUR (${chargeId})` : null, dup: fault === 'dup',
+      result: fail === 'payment' ? 'card declined' : 'charged', resultCls: fail === 'payment' ? 'bad' : 'ok' });
+  await checkpoint(g);
+  if (fail === 'payment') {
+    step(1, 'failed');
+    setSaga('COMPENSATING');
+    step(0, 'compensating');
+    await hop(g, event('payment', 'payment.declined', 'T2', { orderId, reason: 'card_declined' }, 'fail'), { fromAfter: 'card declined', fromAfterCls: 'bad', result: 'order CANCELLED', resultCls: 'bad' });
+    step(0, 'compensated');
+    return finish('ABORTED', `Order service reacts to <code>payment.declined</code> and cancels itself. Each service only knows which event types it handles.`);
+  }
+  step(1, 'done');
+  step(2, 'active');
+  const r = await hop(g, event('payment', 'payment.charged', 'T2', { orderId, chargeId, items: [{ sku, qty: fault === 'poison' ? 'two' : 2 }] }),
+    { fromAfter: 'charged', fromAfterCls: 'ok', poison: fault === 'poison',
+      result: fail === 'inventory' ? 'out of stock' : 'reserved', resultCls: fail === 'inventory' ? 'bad' : 'ok' });
+  await checkpoint(g);
+  if (r === 'dead') {
+    step(2, 'stuck');
+    setNode('order', 'PENDING (forever?)', 'bad');
+    log('warn', 'no owner', `Nobody is waiting for <code>inventory.reserved</code>. Payment has taken the money, the order stays PENDING, and no component owns a deadline for this saga.`);
+    return finish('STUCK', `The classic choreography gap. Fix it with a timeout owner, such as a job that scans PENDING orders or a delayed <code>order.timed_out</code> event. Then someone fixes the record in <b>saga.events.DLT</b> and republishes it.`);
+  }
+  if (fail === 'inventory') {
+    step(2, 'failed');
+    setSaga('COMPENSATING');
+    step(1, 'compensating');
+    await hop(g, event('inventory', 'inventory.rejected', 'T3', { orderId, chargeId, sku, available: 0 }, 'fail'), { fromAfter: 'out of stock', fromAfterCls: 'bad', result: 'refunded' });
+    await checkpoint(g);
+    step(1, 'compensated');
+    step(0, 'compensating');
+    await hop(g, event('payment', 'payment.refunded', 'T2-undo', { orderId, refundId: 're_' + hex(6) }, 'comp'), { fromAfter: 'refunded', result: 'order CANCELLED', resultCls: 'bad' });
+    step(0, 'compensated');
+    return finish('ABORTED', `The failure rippled backwards: <code>inventory.rejected</code> made Payment refund, and <code>payment.refunded</code> made Order cancel. The compensation order lives in each service's event handlers.`);
+  }
+  step(2, 'done');
+  step(3, 'active');
+  await hop(g, event('inventory', 'inventory.reserved', 'T3', { orderId, chargeId, sku, qty: 2, address: 'Lindenstr. 12, 10969 Berlin' }),
+    { fromAfter: 'reserved', fromAfterCls: 'ok', result: fail === 'shipping' ? 'no carrier slot' : 'scheduled', resultCls: fail === 'shipping' ? 'bad' : 'ok' });
+  await checkpoint(g);
+  if (fail === 'shipping') {
+    step(3, 'failed');
+    setSaga('COMPENSATING');
+    step(2, 'compensating');
+    await hop(g, event('shipping', 'shipping.failed', 'T4', { orderId, chargeId, sku, qty: 2, reason: 'no_carrier_capacity' }, 'fail'), { fromAfter: 'no carrier slot', fromAfterCls: 'bad', result: 'stock released' });
+    await checkpoint(g);
+    step(2, 'compensated');
+    step(1, 'compensating');
+    await hop(g, event('inventory', 'inventory.released', 'T3-undo', { orderId, chargeId }, 'comp'), { fromAfter: 'stock released', result: 'refunded' });
+    await checkpoint(g);
+    step(1, 'compensated');
+    step(0, 'compensating');
+    await hop(g, event('payment', 'payment.refunded', 'T2-undo', { orderId, refundId: 're_' + hex(6) }, 'comp'), { fromAfter: 'refunded', result: 'order CANCELLED', resultCls: 'bad' });
+    step(0, 'compensated');
+    return finish('ABORTED', `Three compensations, each triggered by the previous one's event. Every event has to carry enough data (chargeId, sku, qty) for the next service to undo its own work.`);
+  }
+  await hop(g, event('shipping', 'shipping.scheduled', 'T4', { orderId, trackingNo: 'DHL' + hex(8).toUpperCase() }), { fromAfter: 'scheduled', fromAfterCls: 'ok', result: 'order CONFIRMED', resultCls: 'ok' });
+  step(3, 'done');
+  return finish('COMPLETED', `Four services, four events, one partition, no coordinator. The saga's full history is the slice of <b>saga.events</b> with key ${orderId}.`);
+}
+
+function finish(status, html) {
+  setSaga(status);
+  note(html);
+  log(status === 'COMPLETED' ? 'commit' : status === 'STUCK' ? 'warn' : 'saga', 'saga ' + status.toLowerCase(), html);
+}
+
+/* ---------- Controls ---------- */
+function newSaga() {
+  const orderId = 'ord-' + (1040 + Math.floor(Math.random() * 60));
+  SAGA = { id: 'saga-' + hex(4), orderId, amount: 129.0, sku: 'SKU-KB-0721', chargeId: 'ch_' + hex(6) };
+  HOT = [...orderId].reduce((a, c) => a + c.charCodeAt(0), 0) % 3;
+}
+function reset() {
+  RUN.gen++;
+  Object.assign(RUN, { playing: false, stepping: false, running: false, done: false, simT: 0, explainedFanout: false });
+  newSaga();
+  render();
+  renderSteps();
+  $('#sagaStatus').className = 'pill';
+  $('#sagaStatus').textContent = 'NOT STARTED';
+  note('');
+  $('#log').innerHTML = '';
+  $('#props').innerHTML = '<dt>—</dt><dd>Nothing produced yet</dd>';
+  $('#body').textContent = '{}';
+  const orch = S.mode === 'orch';
+  $('#stageTitle').textContent = orch ? 'Orchestration topology' : 'Choreography topology';
+  $('#stageDesc').innerHTML = orch
+    ? 'The orchestrator produces commands to one topic per service and reads replies from <code>saga.replies</code>, matching them to sagas by the <code>saga-id</code> header. Grey cells are other orders\' records; the highlighted partition is the one this order\'s key maps to.'
+    : 'No coordinator. Every service produces domain events to one <code>saga.events</code> topic, and five consumer groups each read all of it. The highlighted partition is the one this order\'s key maps to.';
+  log('append', 'setup', orch
+    ? `Topics <code>payment.commands</code>, <code>inventory.commands</code>, <code>shipping.commands</code>, <code>saga.replies</code>, each with 3 partitions and replication factor 3. <code>enable.auto.commit=false</code>: consumers commit after processing.`
+    : `Topic <code>saga.events</code> with 3 partitions and replication factor 3, read by five consumer groups. <code>enable.auto.commit=false</code>: consumers commit after processing.`);
+  syncControls();
+}
+function startRun() {
+  if (RUN.running) return;
+  RUN.running = true;
+  const g = RUN.gen;
+  (S.mode === 'orch' ? runOrch : runChoreo)(g).then(() => {
+    if (g !== RUN.gen) return;
+    Object.assign(RUN, { running: false, playing: false, stepping: false, done: true });
+    syncControls();
+  }).catch(e => { if (e !== CANCEL) console.error(e); });
+}
+function play() {
+  if (RUN.done) reset();
+  if (RUN.running && RUN.playing) { RUN.playing = false; syncControls(); return; }
+  RUN.playing = true;
+  startRun();
+  syncControls();
+}
+function stepOnce() {
+  if (RUN.done) reset();
+  RUN.playing = false;
+  RUN.stepping = true;
+  startRun();
+  syncControls();
+}
+function syncControls() {
+  $('#play').textContent = RUN.done ? 'Replay' : RUN.playing ? 'Pause' : RUN.running ? 'Resume' : 'Run';
+  $('#mode-orch').setAttribute('aria-pressed', String(S.mode === 'orch'));
+  $('#mode-choreo').setAttribute('aria-pressed', String(S.mode === 'choreo'));
+}
+function changeAndRun() { reset(); play(); }
+
+$('#play').addEventListener('click', play);
+$('#step').addEventListener('click', stepOnce);
+$('#reset').addEventListener('click', reset);
+$('#mode-orch').addEventListener('click', () => { if (S.mode !== 'orch') { S.mode = 'orch'; changeAndRun(); } });
+$('#mode-choreo').addEventListener('click', () => { if (S.mode !== 'choreo') { S.mode = 'choreo'; changeAndRun(); } });
+$('#outcome').addEventListener('change', e => { S.outcome = e.target.value; changeAndRun(); });
+$('#fault').addEventListener('change', e => { S.fault = e.target.value; changeAndRun(); });
+$('#speed').addEventListener('input', e => { S.speed = +e.target.value; $('#speedOut').textContent = S.speed + '×'; });
+
+S.outcome = $('#outcome').value;
+S.fault = $('#fault').value;
+reset();
+setTimeout(play, 500);
+})();
+</script>
